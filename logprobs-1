@@ -12,11 +12,12 @@ from openai import OpenAI
 
 BASE_URL = "https://api.openai.com/v1"
 API_KEY  = "sk-your-key-here"
+MODEL    = "gpt-4o"
 # ---------------------
 
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
-def generate_confidence_scorecard(prompt, model="gpt-4o", risk_threshold=80.0):
+def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     """
     Generates a comprehensive confidence scorecard based on API logprobs.
     """
