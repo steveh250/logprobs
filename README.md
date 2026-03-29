@@ -61,7 +61,7 @@ Set `BASE_URL = "https://api.openai.com/v1"` and provide your API key.
 | Model | logprobs | Status |
 |---|---|---|
 | `gpt-4o` (latest) | ✅ | Confirmed working |
-| Older `gpt-4o` snapshots | ⚠️ | May 500 on `top_logprobs=2` + `temperature=0.0` |
+| `gpt-5`  | ⚠️ | May 500 on `top_logprobs=2` + `temperature=0.0` |
 | `gpt-4o-mini` | ✅ | Works |
 
 If you receive an `InternalServerError: 500`, switch to a different model snapshot. Include the `request ID` from the error message if raising a support ticket with OpenAI.
