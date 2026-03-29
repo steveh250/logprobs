@@ -282,6 +282,68 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
         print(f"  {prob:5.1f}%  {runner_prob:5.1f}%  {margin:5.1f}%  {repr(tok):<20}  {repr(runner)}{flag}")
     print("="*60)
 
+    # Snowball Effect Analysis
+    # A snowball occurs when a low-confidence or narrow-margin token (the pivot)
+    # is immediately followed by a run of high-confidence tokens. The model committed
+    # to an uncertain choice and then confidently built on it — potentially defending
+    # an error with certainty.
+    SNOWBALL_WINDOW        = 8     # tokens to inspect after each pivot
+    SNOWBALL_MIN_WINDOW    = 3     # skip pivots too close to the end
+    SNOWBALL_MARGIN_THRESH = 10.0  # margin below this qualifies as a pivot
+    SNOWBALL_LIFT_THRESH   = 15.0  # post-pivot avg must exceed response avg by this much
+
+    snowballs = []
+    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
+        is_low_prob   = prob < risk_threshold
+        is_close_call = margin is not None and margin < SNOWBALL_MARGIN_THRESH
+        if not (is_low_prob or is_close_call):
+            continue
+        window = all_probs[i + 1 : i + 1 + SNOWBALL_WINDOW]
+        if len(window) < SNOWBALL_MIN_WINDOW:
+            continue
+        post_avg = sum(w[0] for w in window) / len(window)
+        lift     = post_avg - sequence_confidence
+        if lift >= SNOWBALL_LIFT_THRESH:
+            post_text = "".join(w[2] for w in window)
+            snowballs.append((lift, i, prob, margin, tok, runner, runner_prob, post_avg, post_text))
+
+    print(
+        "\nSNOWBALL EFFECT ANALYSIS\n"
+        "  A 'snowball' is a pivot token — one the model was uncertain about —\n"
+        "  immediately followed by a run of high-confidence tokens. This matters\n"
+        "  because the model has locked in on its uncertain choice and is now\n"
+        "  confidently building on it. The text after the pivot may be fluent\n"
+        "  and certain while still being wrong.\n"
+        "\n"
+        "  HOW TO READ THIS:\n"
+        "    Pivot    — the uncertain token where the path forked.\n"
+        "    Chosen%  — confidence in the pivot token itself.\n"
+        "    Margin   — gap to the runner-up (small = near coin-flip).\n"
+        "    PostAvg  — average confidence of the next 8 tokens.\n"
+        "    Lift     — how much PostAvg exceeds the response average.\n"
+        "               A high lift means the model became MORE certain after\n"
+        "               an uncertain choice — the classic snowball signature.\n"
+        "    Context  — the tokens that immediately followed the pivot.\n"
+        "\n"
+        "  WHAT TO LOOK FOR:\n"
+        "    High lift + low chosen% on a factual word = highest risk.\n"
+        "    The model guessed, then committed. Verify that specific claim."
+    )
+    print("-" * 60)
+
+    if not snowballs:
+        print("  ✅ No snowball patterns detected.")
+    else:
+        print(f"  ⚠️  {len(snowballs)} potential snowball(s) found — review the pivot tokens below.\n")
+        print(f"  {'Pos':>4}  {'Chosen%':>7}  {'Margin':>7}  {'PostAvg':>7}  {'Lift':>6}  Pivot token → Context")
+        print(f"  {'-'*4}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*6}  {'-'*40}")
+        for lift, pos, prob, margin, tok, runner, runner_prob, post_avg, post_text in sorted(snowballs, key=lambda x: -x[0]):
+            margin_str = f"{margin:6.1f}%" if margin is not None else "   n/a "
+            flag = " ⚠️" if (margin is not None and margin < 5.0) or prob < 20.0 else ""
+            context = repr(post_text[:40])
+            print(f"  {pos:4d}  {prob:6.1f}%  {margin_str}  {post_avg:6.1f}%  {lift:+5.1f}%  {repr(tok)} → {context}{flag}")
+    print("="*60)
+
 # Let's test it with a prompt that requires specific retrieval
 test_prompt = "What was the exact date and location of the signing of the Treaty of Waitangi?"
 generate_confidence_scorecard(test_prompt)
