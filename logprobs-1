@@ -1,7 +1,20 @@
 import math
 from openai import OpenAI
 
-client = OpenAI()
+# --- Configuration ---
+# For OpenAI public API:
+#   BASE_URL = "https://api.openai.com/v1"
+#   API_KEY  = "sk-..."
+#
+# For Ollama (local):
+#   BASE_URL = "http://localhost:11434/v1"
+#   API_KEY  = "ollama"   # Ollama ignores this but the client requires a value
+
+BASE_URL = "https://api.openai.com/v1"
+API_KEY  = "sk-your-key-here"
+# ---------------------
+
+client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
 def generate_confidence_scorecard(prompt, model="gpt-4o", risk_threshold=80.0):
     """
