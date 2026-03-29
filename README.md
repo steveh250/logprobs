@@ -81,11 +81,6 @@ MODEL    = "llama3.1:8b"
 | Model | logprobs | Notes |
 |---|---|---|
 | `llama3.1:8b` | ✅ | Confirmed working |
-| `llama3.2` | ✅ | Confirmed working |
-| `qwen2.5` | ✅ | Works |
-| `phi3.5` | ✅ | Works |
-| `llama3:8b` (older tag) | ❌ | Returns null logprobs |
-| `mistral:latest` | ❌ | Returns null logprobs |
 
 ---
 
