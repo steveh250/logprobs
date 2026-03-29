@@ -71,17 +71,20 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
 
         linear_prob = math.exp(logp) * 100
 
-        # Extract runner-up from top_logprobs (index 1 is the alternative when chosen is index 0)
+        # Extract runner-up: sort top_logprobs by prob descending, skip duplicates
         runner_up_prob = None
         runner_up_token = ""
         if token_info.top_logprobs and len(token_info.top_logprobs) > 1:
-            runner_up_prob = math.exp(token_info.top_logprobs[1].logprob) * 100
-            runner_up_token = token_info.top_logprobs[1].token
-        elif token_info.top_logprobs and len(token_info.top_logprobs) == 1:
-            # Some models only return the chosen token in top_logprobs
-            runner_up_prob = None
+            sorted_top = sorted(token_info.top_logprobs, key=lambda t: t.logprob, reverse=True)
+            best_prob = math.exp(sorted_top[0].logprob) * 100
+            best_token = sorted_top[0].token
+            for candidate in sorted_top[1:]:
+                if candidate.token != best_token:
+                    runner_up_prob = math.exp(candidate.logprob) * 100
+                    runner_up_token = candidate.token
+                    break
 
-        margin = (linear_prob - runner_up_prob) if runner_up_prob is not None else None
+        margin = (best_prob - runner_up_prob) if runner_up_prob is not None else None
         all_probs.append((linear_prob, margin, token_str, runner_up_token))
 
         # Track the absolute lowest confidence token
