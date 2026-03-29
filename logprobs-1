@@ -30,7 +30,7 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
         model=model,
         messages=[{"role": "user", "content": prompt}],
         logprobs=True,
-        top_logprobs=1,
+        top_logprobs=2,
         temperature=0.0
     )
 
@@ -39,6 +39,12 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     if response.choices[0].logprobs:
         content = response.choices[0].logprobs.content
         print(f"[DEBUG] logprobs.content type: {type(content)}, length: {len(content) if content else 'None/empty'}")
+        if content:
+            first = content[0]
+            print(f"[DEBUG] First token: {repr(first.token)}, top_logprobs count: {len(first.top_logprobs) if first.top_logprobs else 0}")
+            if first.top_logprobs:
+                for i, t in enumerate(first.top_logprobs):
+                    print(f"[DEBUG]   top_logprobs[{i}]: token={repr(t.token)}, prob={math.exp(t.logprob)*100:.2f}%")
     else:
         print(f"[DEBUG] Raw response: {response}")
 
