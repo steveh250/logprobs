@@ -85,7 +85,7 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
                     break
 
         margin = (best_prob - runner_up_prob) if runner_up_prob is not None else None
-        all_probs.append((linear_prob, margin, token_str, runner_up_token))
+        all_probs.append((linear_prob, margin, token_str, runner_up_token, runner_up_prob))
 
         # Track the absolute lowest confidence token
         if linear_prob < min_prob:
@@ -140,7 +140,7 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     buckets = [(i, i + 10) for i in range(0, 100, 10)]
     bar_max_width = 40
     bucket_tokens = [[] for _ in buckets]
-    for prob, margin, tok, runner in all_probs:
+    for prob, margin, tok, runner, runner_prob in all_probs:
         idx = min(int(prob // 10), 9)
         bucket_tokens[idx].append((prob, margin, tok, runner))
 
@@ -154,12 +154,12 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     print("-" * 60)
 
     # Decision Margin histogram (by margin between chosen and runner-up)
-    margins_available = [(prob, margin, tok, runner) for prob, margin, tok, runner in all_probs if margin is not None]
+    margins_available = [(prob, margin, tok, runner, runner_prob) for prob, margin, tok, runner, runner_prob in all_probs if margin is not None]
     if margins_available:
         print("\nDECISION MARGIN DISTRIBUTION  (chosen - runner-up)")
         print("-" * 60)
         margin_buckets = [[] for _ in buckets]
-        for prob, margin, tok, runner in margins_available:
+        for prob, margin, tok, runner, runner_prob in margins_available:
             idx = min(int(margin // 10), 9)
             margin_buckets[idx].append((margin, prob, tok, runner))
 
@@ -175,12 +175,11 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     # Bottom 10 narrowest-margin tokens
     print("\nNARROWEST MARGINS (closest decisions, top 10)")
     print("-" * 60)
-    print(f"  {'Chosen':>6}  {'Margin':>6}  {'Chosen token':<20}  Runner-up")
-    print(f"  {'-'*6}  {'-'*6}  {'-'*20}  {'-'*20}")
-    for prob, margin, tok, runner in sorted(margins_available, key=lambda x: x[1])[:10]:
-        margin_bar = "█" * int((margin / 100) * 30)
+    print(f"  {'Chosen':>6}  {'Runner':>6}  {'Margin':>6}  {'Chosen token':<20}  Runner-up token")
+    print(f"  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*20}  {'-'*20}")
+    for prob, margin, tok, runner, runner_prob in sorted(margins_available, key=lambda x: x[1])[:10]:
         flag = " ⚠️" if margin < 5.0 else ""
-        print(f"  {prob:5.1f}%  {margin:5.1f}%  {repr(tok):<20}  {repr(runner)}{flag}")
+        print(f"  {prob:5.1f}%  {runner_prob:5.1f}%  {margin:5.1f}%  {repr(tok):<20}  {repr(runner)}{flag}")
     print("="*60)
 
 # Let's test it with a prompt that requires specific retrieval
