@@ -164,10 +164,22 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     # Token Probability Distribution histogram (by chosen probability)
     print(
         "\nTOKEN PROBABILITY DISTRIBUTION\n"
-        "  How confident was the model for each token it generated?\n"
-        "  A healthy response clusters heavily in the 90-100% bucket (the model\n"
-        "  knew what it wanted to say). Mass in the lower buckets signals the model\n"
-        "  was guessing. The example token shown is the least confident in each band."
+        "  Each row is a 10% probability band. The bar shows what proportion of\n"
+        "  tokens fell into that band. The token shown is the least confident\n"
+        "  example from that band — the one closest to the lower edge.\n"
+        "\n"
+        "  HOW TO READ THIS:\n"
+        "    90-100%  ████████████  — Model was certain. Grammar, common words,\n"
+        "                             repeated proper nouns. Expected to dominate.\n"
+        "    50- 90%  ███           — Some uncertainty. The model had options but\n"
+        "                             leaned toward one. Usually acceptable.\n"
+        "     0- 50%  █             — Model was genuinely unsure. Unusual words,\n"
+        "                             contested facts, or hallucination territory.\n"
+        "\n"
+        "  WHAT TO LOOK FOR:\n"
+        "    Good  — A tall 90-100% bar with thin or empty lower bands.\n"
+        "    Warn  — Visible bars across 20-70%, meaning widespread uncertainty.\n"
+        "    Bad   — A flat or spread-out distribution, or a significant 0-10% bar."
     )
     print("-" * 60)
     buckets = [(i, i + 10) for i in range(0, 100, 10)]
@@ -186,15 +198,43 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
         print(f"  {lo:3d}-{hi:3d}%  {bar:<{bar_max_width}}  {count:3d} tokens ({pct:4.1f}%)  {example}")
     print("-" * 60)
 
+    # Post-histogram interpretation based on the actual distribution
+    high_pct = (len(bucket_tokens[9]) / token_count) * 100
+    low_pct  = sum(len(bucket_tokens[i]) for i in range(5)) / token_count * 100
+    if high_pct >= 70:
+        shape_comment = f"  ✅ {high_pct:.0f}% of tokens are in the 90-100% band — the model was largely certain."
+    elif high_pct >= 50:
+        shape_comment = f"  🟡 {high_pct:.0f}% of tokens are in the 90-100% band — moderate confidence overall."
+    else:
+        shape_comment = f"  ⚠️  Only {high_pct:.0f}% of tokens are in the 90-100% band — confidence is broadly low."
+    print(shape_comment)
+    if low_pct > 10:
+        print(f"  ⚠️  {low_pct:.0f}% of tokens are below 50% confidence — investigate the example tokens above.")
+
     # Decision Margin histogram (by margin between chosen and runner-up)
     margins_available = [(prob, margin, tok, runner, runner_prob) for prob, margin, tok, runner, runner_prob in all_probs if margin is not None]
     if margins_available:
         print(
             "\nDECISION MARGIN DISTRIBUTION  (chosen prob − runner-up prob)\n"
-            "  How decisive was each token choice? A large margin means the model\n"
-            "  had one clear favourite. A small margin (left side of the chart) means\n"
-            "  it was nearly a coin flip between two options — a key hallucination\n"
-            "  risk signal that raw probability alone cannot reveal."
+            "  This histogram shows the GAP between what the model chose and its\n"
+            "  closest alternative — not how confident it was, but how decisive.\n"
+            "  A token can be low-probability yet still decisive (no close rival).\n"
+            "  A token can be high-probability yet still a near coin-flip.\n"
+            "\n"
+            "  HOW TO READ THIS:\n"
+            "    90-100%  ████  — Landslide decisions. The chosen token was the\n"
+            "                     only real option. Very low hallucination risk.\n"
+            "    10- 90%  ███   — Clear preference but alternatives existed.\n"
+            "                     Normal for ambiguous phrasing choices.\n"
+            "     0- 10%  █     — Near coin-flip. The model almost chose something\n"
+            "                     else. High risk if on a factual word.\n"
+            "\n"
+            "  WHAT TO LOOK FOR:\n"
+            "    Good  — Most mass in the 70-100% range (decisive choices).\n"
+            "    Warn  — A visible 0-10% bar, especially if the example tokens\n"
+            "             shown are dates, names, numbers, or key facts.\n"
+            "    Bad   — A large 0-10% bar combined with a low Weakest Link score.\n"
+            "             The Narrowest Margins table below will identify the culprits."
         )
         print("-" * 60)
         margin_buckets = [[] for _ in buckets]
@@ -210,6 +250,19 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
             example = repr(min(tokens, key=lambda x: x[0])[2]) if tokens else ""
             print(f"  {lo:3d}-{hi:3d}%  {bar:<{bar_max_width}}  {count:3d} tokens ({pct:4.1f}%)  {example}")
         print("-" * 60)
+
+        # Post-histogram interpretation based on the actual margin distribution
+        coin_flip_count = len(margin_buckets[0])
+        coin_flip_pct   = (coin_flip_count / token_count) * 100
+        decisive_count  = sum(len(margin_buckets[i]) for i in range(7, 10))
+        decisive_pct    = (decisive_count / token_count) * 100
+        if coin_flip_pct > 10:
+            print(f"  ⚠️  {coin_flip_pct:.0f}% of tokens had a margin below 10% — many near coin-flip decisions.")
+            print( "      Check the Narrowest Margins table to see if any fall on factual words.")
+        else:
+            print(f"  ✅ Only {coin_flip_pct:.0f}% of tokens had a margin below 10% — most choices were decisive.")
+        if decisive_pct >= 50:
+            print(f"  ✅ {decisive_pct:.0f}% of tokens had a margin above 70% — strong decisiveness overall.")
 
     # Bottom 10 narrowest-margin tokens
     print(
