@@ -109,9 +109,76 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     # Calculate overall sequence confidence
     normalized_logprob = total_logprob / token_count
     sequence_confidence = math.exp(normalized_logprob) * 100
-    
+
     # Calculate risk density
     risk_density = (weak_token_count / token_count) * 100
+
+    # ── Snowball detection ───────────────────────────────────────────────
+    # Must run before adjusted score so we know which post-pivot tokens
+    # to correct. pivot_for_index maps token index → lowest pivot prob
+    # covering it (handles overlapping windows conservatively).
+    SNOWBALL_WINDOW        = 8
+    SNOWBALL_MIN_WINDOW    = 3
+    SNOWBALL_MARGIN_THRESH = 10.0
+    SNOWBALL_LIFT_THRESH   = 15.0
+
+    snowballs = []
+    pivot_for_index = {}
+
+    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
+        is_low_prob   = prob < risk_threshold
+        is_close_call = margin is not None and margin < SNOWBALL_MARGIN_THRESH
+        if not (is_low_prob or is_close_call):
+            continue
+        window = all_probs[i + 1 : i + 1 + SNOWBALL_WINDOW]
+        if len(window) < SNOWBALL_MIN_WINDOW:
+            continue
+        post_avg = sum(w[0] for w in window) / len(window)
+        lift = post_avg - sequence_confidence
+        if lift >= SNOWBALL_LIFT_THRESH:
+            post_text = "".join(w[2] for w in window)
+            snowballs.append((lift, i, prob, margin, tok, runner, runner_prob, post_avg, post_text))
+            for j in range(i + 1, min(i + 1 + SNOWBALL_WINDOW, len(all_probs))):
+                if j not in pivot_for_index or prob < pivot_for_index[j]:
+                    pivot_for_index[j] = prob
+
+    # ── Adjusted Sequence Score ──────────────────────────────────────────
+    # Three corrections applied on top of the raw geometric mean:
+    #
+    #   1. Glue exclusion   — tokens above GLUE_CEILING are near-certain
+    #                         structural words that dilute the mean without
+    #                         carrying factual information.
+    #
+    #   2. Snowball correction — post-pivot tokens are capped at the pivot's
+    #                         probability. Their high confidence is conditioned
+    #                         on the uncertain choice, not earned independently.
+    #
+    #   3. Margin weighting — tokens with a narrow decision margin are down-
+    #                         weighted. A 52% token with a 51% runner-up is
+    #                         genuinely less reliable than a 52% token chosen
+    #                         decisively from a flat field.
+    GLUE_CEILING          = 98.0
+    MARGIN_PENALTY_THRESH = 20.0
+
+    adj_logp_total   = 0.0
+    adj_weight_total = 0.0
+
+    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
+        # 1. Exclude glue words
+        if prob > GLUE_CEILING:
+            continue
+        # 2. Snowball correction
+        effective_prob = min(prob, pivot_for_index[i]) if i in pivot_for_index else prob
+        logp = math.log(max(effective_prob, 0.01) / 100)
+        # 3. Margin weighting
+        if margin is not None and margin < MARGIN_PENALTY_THRESH:
+            weight = 0.5 + (margin / (MARGIN_PENALTY_THRESH * 2))
+        else:
+            weight = 1.0
+        adj_logp_total   += weight * logp
+        adj_weight_total += weight
+
+    adjusted_confidence = math.exp(adj_logp_total / adj_weight_total) * 100 if adj_weight_total > 0 else 0.0
 
     # Output the Scorecard
     print(f"Generated Text: {full_text.strip()}\n" + "="*60)
@@ -122,13 +189,22 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     )
     print("-" * 60)
 
-    # 1. The Overall Score
-    print(f"Overall Sequence Score:   {sequence_confidence:.2f}%")
+    # 1. Overall Score and Adjusted Score
+    delta = adjusted_confidence - sequence_confidence
+    delta_str = f"{delta:+.2f}%"
+    print(f"Overall Sequence Score:   {sequence_confidence:.2f}%  →  Adjusted: {adjusted_confidence:.2f}%  ({delta_str})")
     print(
-        "  The geometric mean probability across every token in the response.\n"
-        "  Think of it as the average 'confidence per word'. A score above ~85%\n"
-        "  suggests the model was generally on solid ground. Below 60% the response\n"
-        "  is statistically shaky even if it reads fluently."
+        "  Overall  = geometric mean of all token probabilities. Fast read on\n"
+        "             average confidence, but inflated by glue words and snowballs.\n"
+        "  Adjusted = same mean after three corrections:\n"
+        "             • Glue exclusion  — removes tokens >98% (structural words\n"
+        "               that carry no factual signal, e.g. 'the', 'and', 'is').\n"
+        "             • Snowball correction — post-pivot tokens are capped at the\n"
+        "               pivot's probability; their certainty was not earned freely.\n"
+        "             • Margin weighting — near coin-flip tokens are down-weighted\n"
+        "               relative to tokens chosen decisively.\n"
+        f"  A large negative delta (e.g. >10%) means the raw score was significantly\n"
+        f"  flattered. The adjusted score is the more conservative trust signal."
     )
 
     # 2. The Weakest Link Score (Crucial for circuit breakers)
@@ -282,31 +358,7 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
         print(f"  {prob:5.1f}%  {runner_prob:5.1f}%  {margin:5.1f}%  {repr(tok):<20}  {repr(runner)}{flag}")
     print("="*60)
 
-    # Snowball Effect Analysis
-    # A snowball occurs when a low-confidence or narrow-margin token (the pivot)
-    # is immediately followed by a run of high-confidence tokens. The model committed
-    # to an uncertain choice and then confidently built on it — potentially defending
-    # an error with certainty.
-    SNOWBALL_WINDOW        = 8     # tokens to inspect after each pivot
-    SNOWBALL_MIN_WINDOW    = 3     # skip pivots too close to the end
-    SNOWBALL_MARGIN_THRESH = 10.0  # margin below this qualifies as a pivot
-    SNOWBALL_LIFT_THRESH   = 15.0  # post-pivot avg must exceed response avg by this much
-
-    snowballs = []
-    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
-        is_low_prob   = prob < risk_threshold
-        is_close_call = margin is not None and margin < SNOWBALL_MARGIN_THRESH
-        if not (is_low_prob or is_close_call):
-            continue
-        window = all_probs[i + 1 : i + 1 + SNOWBALL_WINDOW]
-        if len(window) < SNOWBALL_MIN_WINDOW:
-            continue
-        post_avg = sum(w[0] for w in window) / len(window)
-        lift     = post_avg - sequence_confidence
-        if lift >= SNOWBALL_LIFT_THRESH:
-            post_text = "".join(w[2] for w in window)
-            snowballs.append((lift, i, prob, margin, tok, runner, runner_prob, post_avg, post_text))
-
+    # Snowball Effect Analysis — snowballs already computed in calculation section above
     print(
         "\nSNOWBALL EFFECT ANALYSIS\n"
         "  A 'snowball' is a pivot token — one the model was uncertain about —\n"
