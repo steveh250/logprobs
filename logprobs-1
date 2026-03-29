@@ -116,26 +116,59 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     # Output the Scorecard
     print(f"Generated Text: {full_text.strip()}\n" + "="*60)
     print("CONFIDENCE SCORECARD")
+    print(
+        "  Each metric looks at model certainty from a different angle.\n"
+        "  Together they answer: 'Should I trust this response?'"
+    )
     print("-" * 60)
-    
+
     # 1. The Overall Score
     print(f"Overall Sequence Score:   {sequence_confidence:.2f}%")
-    
+    print(
+        "  The geometric mean probability across every token in the response.\n"
+        "  Think of it as the average 'confidence per word'. A score above ~85%\n"
+        "  suggests the model was generally on solid ground. Below 60% the response\n"
+        "  is statistically shaky even if it reads fluently."
+    )
+
     # 2. The Weakest Link Score (Crucial for circuit breakers)
     alert = "⚠️ TRIPS CIRCUIT BREAKER" if min_prob < risk_threshold else "✅ PASS"
-    print(f"Weakest Link Score:       {min_prob:.2f}% (Token: {repr(weakest_token)}) {alert}")
-    
+    print(f"\nWeakest Link Score:       {min_prob:.2f}% (Token: {repr(weakest_token)}) {alert}")
+    print(
+        f"  The single lowest-confidence token in the entire response.\n"
+        f"  This is the circuit breaker metric: one catastrophically uncertain token\n"
+        f"  can corrupt everything that follows it (the hallucination snowball effect).\n"
+        f"  Threshold is {risk_threshold}% — anything below fires the alert."
+    )
+
     # 3. Risk Density
-    print(f"Risk Density:             {risk_density:.1f}% of tokens are below {risk_threshold}% threshold.")
+    print(f"\nRisk Density:             {risk_density:.1f}% of tokens are below {risk_threshold}% threshold.")
+    print(
+        f"  What fraction of the response was generated with low confidence?\n"
+        f"  A single weak token may be a proper noun or unusual word — normal.\n"
+        f"  High risk density (>20%) means uncertainty is widespread, not isolated."
+    )
 
     # 4. Narrowest Decision Margin
     if min_margin < 100.0:
         margin_alert = "⚠️ COIN FLIP" if min_margin < 5.0 else "✅ PASS"
-        print(f"Narrowest Margin:         {min_margin:.2f}% ({repr(min_margin_chosen)} vs {repr(min_margin_runner)}) {margin_alert}")
+        print(f"\nNarrowest Margin:         {min_margin:.2f}% ({repr(min_margin_chosen)} vs {repr(min_margin_runner)}) {margin_alert}")
+        print(
+            "  The smallest gap between the chosen token and its closest competitor.\n"
+            "  A near-zero margin means the model was genuinely torn — the response\n"
+            "  could easily have gone a different way at that point. This is especially\n"
+            "  dangerous on factual tokens like dates, names, or numbers."
+        )
     print("="*60)
 
     # Token Probability Distribution histogram (by chosen probability)
-    print("\nTOKEN PROBABILITY DISTRIBUTION")
+    print(
+        "\nTOKEN PROBABILITY DISTRIBUTION\n"
+        "  How confident was the model for each token it generated?\n"
+        "  A healthy response clusters heavily in the 90-100% bucket (the model\n"
+        "  knew what it wanted to say). Mass in the lower buckets signals the model\n"
+        "  was guessing. The example token shown is the least confident in each band."
+    )
     print("-" * 60)
     buckets = [(i, i + 10) for i in range(0, 100, 10)]
     bar_max_width = 40
@@ -156,7 +189,13 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     # Decision Margin histogram (by margin between chosen and runner-up)
     margins_available = [(prob, margin, tok, runner, runner_prob) for prob, margin, tok, runner, runner_prob in all_probs if margin is not None]
     if margins_available:
-        print("\nDECISION MARGIN DISTRIBUTION  (chosen - runner-up)")
+        print(
+            "\nDECISION MARGIN DISTRIBUTION  (chosen prob − runner-up prob)\n"
+            "  How decisive was each token choice? A large margin means the model\n"
+            "  had one clear favourite. A small margin (left side of the chart) means\n"
+            "  it was nearly a coin flip between two options — a key hallucination\n"
+            "  risk signal that raw probability alone cannot reveal."
+        )
         print("-" * 60)
         margin_buckets = [[] for _ in buckets]
         for prob, margin, tok, runner, runner_prob in margins_available:
@@ -173,7 +212,15 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
         print("-" * 60)
 
     # Bottom 10 narrowest-margin tokens
-    print("\nNARROWEST MARGINS (closest decisions, top 10)")
+    print(
+        "\nNARROWEST MARGINS — closest decisions (top 10)\n"
+        "  These are the tokens where the model most nearly chose something else.\n"
+        "  Chosen = probability of the token actually generated.\n"
+        "  Runner = probability of the next-best alternative the model considered.\n"
+        "  Margin = the gap between them. Small margins on factual words (dates,\n"
+        "  names, numbers) are the strongest hallucination signal in this report.\n"
+        "  ⚠️  flags margins below 5% — effectively a coin flip."
+    )
     print("-" * 60)
     print(f"  {'Chosen':>6}  {'Runner':>6}  {'Margin':>6}  {'Chosen token':<20}  Runner-up token")
     print(f"  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*20}  {'-'*20}")
