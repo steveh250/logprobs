@@ -10,9 +10,9 @@ from openai import OpenAI
 #   BASE_URL = "http://localhost:11434/v1"
 #   API_KEY  = "ollama"   # Ollama ignores this but the client requires a value
 
-BASE_URL = "https://api.openai.com/v1"
-API_KEY  = "sk-your-key-here"
-MODEL    = "gpt-4o"
+BASE_URL = "http://localhost:11434/v1"
+API_KEY  = "ollama"
+MODEL    = "llama3.1:8b"
 # ---------------------
 
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
