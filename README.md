@@ -2,10 +2,6 @@
 Investigate more deterministic approach to understanding model response confidence and hallucinations. 
 
 
-Here is a complete, structured draft for your GitHub `README.md`. It captures the architectural philosophy, the mathematical mechanics, and the Python implementation of the entropy-based circuit breakers we discussed, perfectly framed for developers and AI engineers.
-
-***
-
 # Entropy-Based Routing & Confidence Circuit Breakers for LLMs
 
 This repository provides architectural frameworks and Python implementations for building mathematical guardrails around Large Language Models (LLMs). 
