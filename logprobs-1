@@ -30,6 +30,7 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
         model=model,
         messages=[{"role": "user", "content": prompt}],
         logprobs=True,
+        top_logprobs=1,
         temperature=0.0
     )
 
@@ -45,7 +46,7 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
         print("[DEBUG] No logprobs content — Ollama may not support logprobs for this model.")
         return "Error: No logprobs returned."
 
-    all_probs = []
+    all_probs = []   # (chosen_prob, margin, chosen_token, runner_up_token)
     total_logprob = 0.0
     token_count = 0
     full_text = ""
@@ -54,18 +55,39 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     min_prob = 100.0
     weakest_token = ""
     weak_token_count = 0
+    min_margin = 100.0
+    min_margin_chosen = ""
+    min_margin_runner = ""
 
     for token_info in response.choices[0].logprobs.content:
         token_str = token_info.token
         logp = token_info.logprob
 
         linear_prob = math.exp(logp) * 100
-        all_probs.append((linear_prob, token_str))
+
+        # Extract runner-up from top_logprobs (index 1 is the alternative when chosen is index 0)
+        runner_up_prob = None
+        runner_up_token = ""
+        if token_info.top_logprobs and len(token_info.top_logprobs) > 1:
+            runner_up_prob = math.exp(token_info.top_logprobs[1].logprob) * 100
+            runner_up_token = token_info.top_logprobs[1].token
+        elif token_info.top_logprobs and len(token_info.top_logprobs) == 1:
+            # Some models only return the chosen token in top_logprobs
+            runner_up_prob = None
+
+        margin = (linear_prob - runner_up_prob) if runner_up_prob is not None else None
+        all_probs.append((linear_prob, margin, token_str, runner_up_token))
 
         # Track the absolute lowest confidence token
         if linear_prob < min_prob:
             min_prob = linear_prob
             weakest_token = token_str
+
+        # Track the narrowest decision margin
+        if margin is not None and margin < min_margin:
+            min_margin = margin
+            min_margin_chosen = token_str
+            min_margin_runner = runner_up_token
 
         # Count how many tokens fall below our enterprise risk threshold
         if linear_prob < risk_threshold:
@@ -96,34 +118,60 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     
     # 3. Risk Density
     print(f"Risk Density:             {risk_density:.1f}% of tokens are below {risk_threshold}% threshold.")
+
+    # 4. Narrowest Decision Margin
+    if min_margin < 100.0:
+        margin_alert = "⚠️ COIN FLIP" if min_margin < 5.0 else "✅ PASS"
+        print(f"Narrowest Margin:         {min_margin:.2f}% ({repr(min_margin_chosen)} vs {repr(min_margin_runner)}) {margin_alert}")
     print("="*60)
 
-    # Token Probability Histogram
+    # Token Probability Distribution histogram (by chosen probability)
     print("\nTOKEN PROBABILITY DISTRIBUTION")
     print("-" * 60)
     buckets = [(i, i + 10) for i in range(0, 100, 10)]
     bar_max_width = 40
     bucket_tokens = [[] for _ in buckets]
-    for prob, tok in all_probs:
+    for prob, margin, tok, runner in all_probs:
         idx = min(int(prob // 10), 9)
-        bucket_tokens[idx].append((prob, tok))
+        bucket_tokens[idx].append((prob, margin, tok, runner))
 
     for (lo, hi), tokens in zip(buckets, bucket_tokens):
         count = len(tokens)
         bar_width = int((count / token_count) * bar_max_width)
         bar = "█" * bar_width
         pct = (count / token_count) * 100
-        # Show the lowest-confidence token in each bucket as an example
-        example = repr(min(tokens, key=lambda x: x[0])[1]) if tokens else ""
+        example = repr(min(tokens, key=lambda x: x[0])[2]) if tokens else ""
         print(f"  {lo:3d}-{hi:3d}%  {bar:<{bar_max_width}}  {count:3d} tokens ({pct:4.1f}%)  {example}")
     print("-" * 60)
 
-    # Bottom 10 riskiest tokens
-    print("\nRISKIEST TOKENS (lowest 10)")
+    # Decision Margin histogram (by margin between chosen and runner-up)
+    margins_available = [(prob, margin, tok, runner) for prob, margin, tok, runner in all_probs if margin is not None]
+    if margins_available:
+        print("\nDECISION MARGIN DISTRIBUTION  (chosen - runner-up)")
+        print("-" * 60)
+        margin_buckets = [[] for _ in buckets]
+        for prob, margin, tok, runner in margins_available:
+            idx = min(int(margin // 10), 9)
+            margin_buckets[idx].append((margin, prob, tok, runner))
+
+        for (lo, hi), tokens in zip(buckets, margin_buckets):
+            count = len(tokens)
+            bar_width = int((count / token_count) * bar_max_width)
+            bar = "█" * bar_width
+            pct = (count / token_count) * 100
+            example = repr(min(tokens, key=lambda x: x[0])[2]) if tokens else ""
+            print(f"  {lo:3d}-{hi:3d}%  {bar:<{bar_max_width}}  {count:3d} tokens ({pct:4.1f}%)  {example}")
+        print("-" * 60)
+
+    # Bottom 10 narrowest-margin tokens
+    print("\nNARROWEST MARGINS (closest decisions, top 10)")
     print("-" * 60)
-    for prob, tok in sorted(all_probs, key=lambda x: x[0])[:10]:
-        bar = "█" * int(prob / 2)
-        print(f"  {prob:6.2f}%  {bar:<50}  {repr(tok)}")
+    print(f"  {'Chosen':>6}  {'Margin':>6}  {'Chosen token':<20}  Runner-up")
+    print(f"  {'-'*6}  {'-'*6}  {'-'*20}  {'-'*20}")
+    for prob, margin, tok, runner in sorted(margins_available, key=lambda x: x[1])[:10]:
+        margin_bar = "█" * int((margin / 100) * 30)
+        flag = " ⚠️" if margin < 5.0 else ""
+        print(f"  {prob:5.1f}%  {margin:5.1f}%  {repr(tok):<20}  {repr(runner)}{flag}")
     print("="*60)
 
 # Let's test it with a prompt that requires specific retrieval
