@@ -1,0 +1,76 @@
+import math
+from openai import OpenAI
+
+client = OpenAI()
+
+def generate_confidence_scorecard(prompt, model="gpt-4o", risk_threshold=80.0):
+    """
+    Generates a comprehensive confidence scorecard based on API logprobs.
+    """
+    print(f"Analyzing Prompt: '{prompt}'\n" + "="*60)
+    
+    response = client.chat.completions.create(
+        model=model, 
+        messages=[{"role": "user", "content": prompt}],
+        logprobs=True,
+        temperature=0.0 
+    )
+    
+    if not response.choices[0].logprobs or not response.choices[0].logprobs.content:
+        return "Error: No logprobs returned."
+
+    tokens_data = []
+    total_logprob = 0.0
+    token_count = 0
+    full_text = ""
+    
+    # Tracking variables for our scorecard
+    min_prob = 100.0
+    weakest_token = ""
+    weak_token_count = 0
+
+    for token_info in response.choices[0].logprobs.content:
+        token_str = token_info.token
+        logp = token_info.logprob
+        
+        linear_prob = math.exp(logp) * 100
+        
+        # Track the absolute lowest confidence token
+        if linear_prob < min_prob:
+            min_prob = linear_prob
+            weakest_token = token_str
+            
+        # Count how many tokens fall below our enterprise risk threshold
+        if linear_prob < risk_threshold:
+            weak_token_count += 1
+            
+        total_logprob += logp
+        token_count += 1
+        full_text += token_str
+
+    # Calculate overall sequence confidence
+    normalized_logprob = total_logprob / token_count
+    sequence_confidence = math.exp(normalized_logprob) * 100
+    
+    # Calculate risk density
+    risk_density = (weak_token_count / token_count) * 100
+
+    # Output the Scorecard
+    print(f"Generated Text: {full_text.strip()}\n" + "="*60)
+    print("CONFIDENCE SCORECARD")
+    print("-" * 60)
+    
+    # 1. The Overall Score
+    print(f"Overall Sequence Score:   {sequence_confidence:.2f}%")
+    
+    # 2. The Weakest Link Score (Crucial for circuit breakers)
+    alert = "⚠️ TRIPS CIRCUIT BREAKER" if min_prob < risk_threshold else "✅ PASS"
+    print(f"Weakest Link Score:       {min_prob:.2f}% (Token: {repr(weakest_token)}) {alert}")
+    
+    # 3. Risk Density
+    print(f"Risk Density:             {risk_density:.1f}% of tokens are below {risk_threshold}% threshold.")
+    print("="*60)
+
+# Let's test it with a prompt that requires specific retrieval
+test_prompt = "What was the exact date and location of the signing of the Treaty of Waitangi?"
+generate_confidence_scorecard(test_prompt)
