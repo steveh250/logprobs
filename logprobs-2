@@ -291,21 +291,55 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     print(
         "\nTOKEN GAP CHART — sentence progression\n"
         "  A column chart showing chosen vs runner-up probability for each token\n"
-        "  in generation order. Each column represents one token:\n"
+        "  in generation order. Each column represents one token.\n"
         "\n"
-        "    ▓▓  Upper filled area  = chosen token probability (from top)\n"
-        "        White gap          = margin between chosen and runner-up\n"
-        "    ░░  Lower filled area  = runner-up token probability (from bottom)\n"
+        "  ANATOMY OF A COLUMN:\n"
+        "    The Y-axis represents probability from 0% (bottom) to 100% (top).\n"
+        "    Each column is divided into three zones:\n"
         "\n"
-        "  HOW TO READ THIS:\n"
-        "    Wide gap   — The model was decisive. Low hallucination risk.\n"
-        "    Narrow gap — The model nearly chose something else. Check the token.\n"
-        "    No gap     — Chosen and runner-up probabilities overlap; near coin-flip.\n"
+        "    ▓▓▓▓  Upper block (▓)  — Chosen token probability. Fills DOWN from\n"
+        "    ▓▓▓▓                     100%. A tall ▓ block means the model gave\n"
+        "                             high probability to its chosen token.\n"
+        "      ↕   White gap        — The MARGIN between chosen and runner-up.\n"
+        "          (empty space)      This is the key visual: it shows how\n"
+        "                             decisive the model was. A wide gap means\n"
+        "                             the chosen token dominated. A narrow gap\n"
+        "                             means the runner-up was close behind.\n"
+        "    ░░░░  Lower block (░)  — Runner-up token probability. Fills UP from\n"
+        "    ░░░░                     0%. A tall ░ block means the second-best\n"
+        "                             token was also quite probable.\n"
+        "\n"
+        "  HOW TO READ THE CHART:\n"
+        "    • Scan LEFT to RIGHT to follow the sentence as it was generated.\n"
+        "    • Watch the white gap — it should stay wide for a confident response.\n"
+        "    • Wide gap (▓ and ░ far apart):\n"
+        "        The model was decisive. It strongly preferred one token over all\n"
+        "        alternatives. Low hallucination risk at this position.\n"
+        "    • Narrow gap (▓ and ░ nearly touching):\n"
+        "        The model was torn between two options. It nearly chose something\n"
+        "        different. If this falls on a factual word, treat it as suspect.\n"
+        "    • No gap (▓ and ░ merge):\n"
+        "        A near coin-flip. The chosen and runner-up tokens had almost\n"
+        "        identical probability. The response could easily have diverged.\n"
+        "    • Both blocks short (▓ small at top, ░ small at bottom, wide gap):\n"
+        "        Neither the chosen nor the runner-up was very probable. The model\n"
+        "        spread probability across many tokens — it was unsure in general,\n"
+        "        even though the gap between first and second place was large.\n"
         "\n"
         "  WHAT TO LOOK FOR:\n"
-        "    Columns where the gap narrows or vanishes indicate uncertainty.\n"
-        "    Clusters of narrow-gap columns = sustained indecision.\n"
-        "    A sudden squeeze on a factual word (name, date, number) is a red flag."
+        "    • Columns where the gap narrows or vanishes indicate uncertainty.\n"
+        "    • Clusters of narrow-gap columns = sustained indecision — the model\n"
+        "      was guessing through an entire phrase, not just one token.\n"
+        "    • A sudden squeeze on a factual word (name, date, number) is a red\n"
+        "      flag — these are the tokens most likely to be hallucinated.\n"
+        "    • A wide gap following a narrow gap may indicate a snowball: the\n"
+        "      model committed to an uncertain choice and then became confidently\n"
+        "      wrong (see the Snowball Effect Analysis section below).\n"
+        "\n"
+        "  BELOW EACH CHART:\n"
+        "    Row 1 — Token index number (position in the generated sequence).\n"
+        "    Row 2 — The actual token text (truncated if long).\n"
+        "    Row 3 — The margin percentage. ⚠ flags margins below 5%."
     )
     print("-" * 80)
 
@@ -409,6 +443,34 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
                 print(f"      Tokens {start_idx}-{end_idx}: {repr(cluster_text)}")
     else:
         print("  ✅ All tokens had a gap of 10% or more — consistently decisive choices.")
+
+    # Chart interpretation summary
+    # Compute stats for the interpretation
+    margins_for_chart = [m for _, m, _, _, _ in all_probs if m is not None]
+    avg_margin = sum(margins_for_chart) / len(margins_for_chart) if margins_for_chart else 0.0
+    narrow_count = sum(1 for m in margins_for_chart if m < 10.0)
+    coinflip_count = sum(1 for m in margins_for_chart if m < 5.0)
+    wide_count = sum(1 for m in margins_for_chart if m >= 50.0)
+
+    print(
+        "\n  CHART INTERPRETATION SUMMARY\n"
+        f"    Average margin across all tokens:  {avg_margin:.1f}%\n"
+        f"    Tokens with wide gap    (≥50%):    {wide_count:3d}  — decisive, high trust\n"
+        f"    Tokens with narrow gap  (<10%):    {narrow_count:3d}  — indecisive, verify these\n"
+        f"    Tokens with coin-flip   (< 5%):    {coinflip_count:3d}  — nearly random, high risk"
+    )
+    if avg_margin >= 50.0:
+        print("    ✅ Overall: The model was highly decisive throughout this response.")
+    elif avg_margin >= 25.0:
+        print("    🟡 Overall: Moderate decisiveness. Some tokens warrant review.")
+    else:
+        print("    ⚠️  Overall: Low average margin — the model was frequently uncertain.")
+    if coinflip_count > 0:
+        print(
+            f"    ⚠️  {coinflip_count} coin-flip token(s) detected. Cross-reference these with\n"
+            "       the Narrowest Margins table below to identify which words were guesses."
+        )
+    print("=" * 80)
 
     # Decision Margin histogram (by margin between chosen and runner-up)
     margins_available = [(prob, margin, tok, runner, runner_prob) for prob, margin, tok, runner, runner_prob in all_probs if margin is not None]
