@@ -1,5 +1,5 @@
 # logprobs
-A Python tool for measuring LLM response confidence and detecting hallucinations using token-level log probabilities.
+A Python tool for measuring LLM generation stability and hallucination risk using token-level log probabilities and runner-up decision margins.
 
 ---
 
@@ -7,13 +7,48 @@ A Python tool for measuring LLM response confidence and detecting hallucinations
 
 When an LLM generates text, it doesn't just pick words — it calculates a probability distribution over its entire vocabulary at every step and samples from it. The API can return these raw probabilities (`logprobs`), giving us a mathematical window into how certain the model was about each word it generated.
 
-This tool analyses those probabilities and produces a **Confidence Scorecard** designed to answer one question: *should I trust this response?*
+This tool analyses those probabilities and produces a Confidence Scorecard designed to answer a narrower and more useful question:
+
+**Did the model generate this response along a stable path, or did it make fragile choices that increase the risk of hallucination?**
+
+This is not a fact checker. It does not prove whether a response is true in the real world. Instead, it measures signs of generative instability: low-support token choices, narrow decision margins, and "guess-then-commit" patterns where the model becomes fluent after an uncertain step.
+
+---
+## What This Tool Is (and Is Not)
+
+This tool is best understood as a hallucination-risk and generation-stability analyzer.
+
+It does **not** tell you whether a statement is true.
+It does **not** replace external verification.
+It does **not** convert logprobs into a direct "truth percentage."
+
+What it does do is identify signs that the model may have been guessing while generating:
+- low-probability token choices
+- narrow margins between the chosen token and the runner-up
+- local "fork points" where the model could easily have gone a different way
+- snowball patterns where an uncertain choice is followed by highly fluent continuation
+
+In other words:
+
+- **self-reported confidence** is rhetorical confidence
+- **logprob analysis** is generative confidence
+- **external checking** is factual confidence
+
+This tool focuses on the middle one.
 
 ---
 
 ## The Problem with Naive Confidence Checks
 
-Asking a model "are you sure?" doesn't work — RLHF training biases models toward confident-sounding answers regardless of their internal uncertainty. Three subtler traps exist when analysing logprobs directly:
+Asking a model "are you sure?" doesn't work — RLHF training biases models toward confident-sounding answers regardless of their internal uncertainty. 
+
+A useful way to think about the gap is this:
+ - When a model says "I'm 95% confident," it is generating a confidence statement as text.
+ - When we inspect token logprobs and runner-up margins, we are looking at how contested the model's choices actually were during generation.
+
+Those are not the same thing.
+
+Three subtler traps exist when analysing logprobs directly:
 
 **1. The Glue Word Illusion**
 A 100-word response might contain 80 structural words ("the", "and", "is") at ~99% confidence. If the model hallucinates one critical fact at 12% confidence, averaging all tokens masks it entirely.
@@ -114,16 +149,16 @@ Overall Sequence Score:   72.47%  →  Adjusted: 58.31%  (-14.16%)
 | **Snowball correction** | Post-pivot tokens are capped at the pivot's probability — their high certainty was conditioned on an uncertain choice, not earned independently |
 | **Margin weighting** | Near coin-flip tokens are down-weighted; tokens chosen decisively count fully |
 
-A large negative delta (>10%) means the raw score was significantly flattered. Use the adjusted score as your primary trust signal.
+A large negative delta (>10%) means the raw score was significantly flattered. Use the adjusted score as your primary generation-stability signal.  A low score does not prove the answer is false. It indicates that the model's path to the answer was fragile and deserves verification.
 
 ### 2. Weakest Link Score
-The single lowest-confidence token. This is the **circuit breaker**: one catastrophically uncertain token can corrupt everything that follows (the hallucination snowball). Fires `⚠️ TRIPS CIRCUIT BREAKER` if below the risk threshold (default 80%).
+The single lowest-confidence token. This is the **circuit breaker**: one catastrophically uncertain token can corrupt everything that follows (the hallucination snowball). Fires `⚠️ TRIPS CIRCUIT BREAKER` if below the risk threshold (default 80%).  Interpret this as the most fragile point in the generation path, not automatic proof that the answer is wrong. It matters most when the token is semantically meaningful (for example, a date, name, number, or place), not when it is just punctuation or formatting.
 
 ### 3. Risk Density
-What fraction of tokens were generated below the risk threshold. A single weak token may just be an unusual proper noun — normal. High risk density (>20%) means uncertainty is widespread, not isolated.
+What fraction of tokens were generated below the risk threshold. A single weak token may just be an unusual proper noun — normal. High risk density (>20%) means uncertainty is widespread, not isolated.  Risk density is about how widespread instability was. It does not mean that the same percentage of the answer is false.
 
 ### 4. Narrowest Decision Margin
-The smallest gap between the model's chosen token and its closest competitor. A near-zero margin means the model was genuinely torn at that point — the response could easily have gone a different way. This is especially dangerous on factual tokens: a 0.3% margin between `'February'` and `'March'` is a direct hallucination risk flag that the raw probability score alone would never surface. Fires `⚠️ COIN FLIP` if margin is below 5%.
+The smallest gap between the model's chosen token and its closest competitor. A near-zero margin means the model was genuinely torn at that point — the response could easily have gone a different way. This is especially dangerous on factual tokens: a 0.3% margin between `'February'` and `'March'` is a direct hallucination risk flag that the raw probability score alone would never surface. Fires `⚠️ COIN FLIP` if margin is below 5%.  Small margins on semantic tokens (meaningful words)are much more interesting than small margins on stylistic or structural tokens (',').  Not all low-confidence tokens are equally important. A weak comma or bracket is usually noise. A weak year, name, place, or quoted term is much more interesting. In practice, semantic instability matters more than structural instability.
 
 ---
 
@@ -213,6 +248,44 @@ Agent response + Scorecard
 4. Risk Density > 20% → diffuse uncertainty, consider full re-generation with RAG
 
 This turns hallucination management from reactive (catching errors after the fact) to proactive (routing based on measured uncertainty before errors propagate).
+
+---
+## How to Interpret Results
+
+This scorecard measures hallucination risk, not truth.
+
+A response can be:
+- factually correct but generated fragily
+- factually wrong but generated confidently
+- factually correct and generated stably
+- factually wrong and generated fragily
+
+The scorecard helps identify the stable vs fragile part.
+
+### Stable generation
+The model appears to have generated along a well-supported path.
+Typical signs:
+- relatively strong adjusted score
+- low risk density
+- few narrow margins
+- no meaningful snowball pivots on semantic tokens
+
+### Fragile generation
+The answer may be correct, but the generation path was shaky.
+Typical signs:
+- noticeable raw vs adjusted drop
+- some narrow margins
+- some snowball pivots
+- uncertainty spread across parts of the response
+
+### Probable hallucination pattern
+This is the classic "guess then commit" shape.
+Typical signs:
+- large raw vs adjusted drop
+- high risk density
+- very weak semantic pivot
+- narrow margins on dates, names, numbers, places, references
+- fluent continuation after an unstable choice
 
 ---
 
