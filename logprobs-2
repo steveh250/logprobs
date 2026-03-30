@@ -287,38 +287,102 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     if low_pct > 10:
         print(f"  ⚠️  {low_pct:.0f}% of tokens are below 50% confidence — investigate the example tokens above.")
 
-    # Token Gap Chart — sentence progression view
+    # Token Gap Chart — sentence progression column chart
     print(
         "\nTOKEN GAP CHART — sentence progression\n"
-        "  Each row is one token in generation order. The bar shows the gap\n"
-        "  between the chosen token's probability and the next-best alternative.\n"
-        "  A long bar means the model was decisive; a short/empty bar means it\n"
-        "  nearly chose something else at that point.\n"
+        "  A column chart showing chosen vs runner-up probability for each token\n"
+        "  in generation order. Each column represents one token:\n"
+        "\n"
+        "    ▓▓  Upper filled area  = chosen token probability (from top)\n"
+        "        White gap          = margin between chosen and runner-up\n"
+        "    ░░  Lower filled area  = runner-up token probability (from bottom)\n"
         "\n"
         "  HOW TO READ THIS:\n"
-        "    Long bar  ████████  — Large gap, confident choice. Low risk.\n"
-        "    Short bar ██        — Small gap, model was torn. Check the token.\n"
-        "    No bar              — No runner-up data or margin ≈ 0%.\n"
-        "    ⚠️  flags gaps below 5% on any token.\n"
+        "    Wide gap   — The model was decisive. Low hallucination risk.\n"
+        "    Narrow gap — The model nearly chose something else. Check the token.\n"
+        "    No gap     — Chosen and runner-up probabilities overlap; near coin-flip.\n"
         "\n"
         "  WHAT TO LOOK FOR:\n"
-        "    Clusters of short bars indicate regions of sustained uncertainty.\n"
-        "    A sudden dip on a factual word (name, date, number) is a red flag."
+        "    Columns where the gap narrows or vanishes indicate uncertainty.\n"
+        "    Clusters of narrow-gap columns = sustained indecision.\n"
+        "    A sudden squeeze on a factual word (name, date, number) is a red flag."
     )
-    print("-" * 60)
-    gap_bar_max = 30
-    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
-        gap = margin if margin is not None else 0.0
-        bar_width = int((gap / 100.0) * gap_bar_max)
-        bar = "█" * bar_width
-        flag = " ⚠️" if margin is not None and margin < 5.0 else ""
-        token_display = repr(tok)
-        if margin is not None:
-            runner_display = repr(runner)
-            print(f"  {i:3d}  {token_display:<20}  {bar:<{gap_bar_max}}  gap {gap:5.1f}%  (vs {runner_display}){flag}")
-        else:
-            print(f"  {i:3d}  {token_display:<20}  {'·':<{gap_bar_max}}    n/a")
-    print("-" * 60)
+    print("-" * 80)
+
+    CHART_HEIGHT = 20       # rows in the chart
+    COL_WIDTH    = 4        # characters per token column
+    MAX_COLS     = 16       # tokens per chart row before wrapping
+
+    for chunk_start in range(0, len(all_probs), MAX_COLS):
+        chunk = all_probs[chunk_start:chunk_start + MAX_COLS]
+        num_cols = len(chunk)
+
+        # Print chart rows top-to-bottom
+        # Each row is a 5% band. Filled ▓ if in chosen zone (top), ░ if in
+        # runner-up zone (bottom), space for the gap between them.
+        for row in range(CHART_HEIGHT):
+            level    = 100.0 * (CHART_HEIGHT - row) / CHART_HEIGHT
+            level_lo = 100.0 * (CHART_HEIGHT - row - 1) / CHART_HEIGHT
+
+            if row % 4 == 0:
+                label = f"{level:3.0f}% "
+            else:
+                label = "     "
+
+            line = label + "│"
+            for prob, margin, tok, runner, runner_prob in chunk:
+                chosen_pct = prob
+                runner_pct = runner_prob if runner_prob is not None else 0.0
+
+                # Chosen zone: top of chart down to (100 - chosen_pct)
+                # Runner zone: bottom of chart up to runner_pct
+                # Gap: everything in between
+                chosen_floor = 100.0 - chosen_pct
+                if level_lo >= chosen_floor:
+                    cell = "▓" * COL_WIDTH
+                elif level <= runner_pct:
+                    cell = "░" * COL_WIDTH
+                else:
+                    cell = " " * COL_WIDTH
+
+                line += cell
+            print(line)
+
+        # Bottom axis
+        print(label_blank := "     " + "│" + "─" * (num_cols * COL_WIDTH))
+
+        # Token index labels
+        idx_line = "     " + " "
+        for i in range(num_cols):
+            idx_line += f"{chunk_start + i:<{COL_WIDTH}d}"
+        print(idx_line)
+
+        # Token text labels (truncated)
+        tok_line = "     " + " "
+        for prob, margin, tok, runner, runner_prob in chunk:
+            display = tok.strip() or "·"
+            if len(display) > COL_WIDTH - 1:
+                display = display[:COL_WIDTH - 1]
+            tok_line += f"{display:<{COL_WIDTH}}"
+        print(tok_line)
+
+        # Margin summary line
+        margin_line = "     " + " "
+        for prob, margin_val, tok, runner, runner_prob in chunk:
+            if margin_val is not None:
+                if margin_val < 5.0:
+                    m_str = f"⚠{margin_val:.0f}"
+                else:
+                    m_str = f"{margin_val:.0f}%"
+            else:
+                m_str = "n/a"
+            margin_line += f"{m_str:<{COL_WIDTH}}"
+        print(margin_line)
+
+        if chunk_start + MAX_COLS < len(all_probs):
+            print()  # blank line between chunks
+
+    print("-" * 80)
 
     # Post-chart interpretation
     low_gap_tokens = [(i, prob, margin, tok, runner) for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs) if margin is not None and margin < 10.0]
