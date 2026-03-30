@@ -1,0 +1,460 @@
+import math
+from openai import OpenAI
+
+# --- Configuration ---
+# For OpenAI public API:
+#   BASE_URL = "https://api.openai.com/v1"
+#   API_KEY  = "sk-..."
+#
+# For Ollama (local):
+#   BASE_URL = "http://localhost:11434/v1"
+#   API_KEY  = "ollama"   # Ollama ignores this but the client requires a value
+
+BASE_URL = "http://localhost:11434/v1"
+API_KEY  = "ollama"
+MODEL    = "llama3.1:8b"
+# ---------------------
+
+client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+
+def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
+    """
+    Generates a comprehensive confidence scorecard based on API logprobs.
+    """
+    print(f"Analyzing Prompt: '{prompt}'\n" + "="*60)
+    print(f"[DEBUG] Connecting to: {BASE_URL}")
+    print(f"[DEBUG] Model: {model}")
+    print(f"[DEBUG] Sending request...")
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        logprobs=True,
+        top_logprobs=2,
+        temperature=0.0
+    )
+
+    print(f"[DEBUG] Response received. Finish reason: {response.choices[0].finish_reason}")
+    print(f"[DEBUG] logprobs present: {response.choices[0].logprobs is not None}")
+    if response.choices[0].logprobs:
+        content = response.choices[0].logprobs.content
+        print(f"[DEBUG] logprobs.content type: {type(content)}, length: {len(content) if content else 'None/empty'}")
+        if content:
+            first = content[0]
+            print(f"[DEBUG] First token: {repr(first.token)}, top_logprobs count: {len(first.top_logprobs) if first.top_logprobs else 0}")
+            if first.top_logprobs:
+                for i, t in enumerate(first.top_logprobs):
+                    print(f"[DEBUG]   top_logprobs[{i}]: token={repr(t.token)}, prob={math.exp(t.logprob)*100:.2f}%")
+    else:
+        print(f"[DEBUG] Raw response: {response}")
+
+    if not response.choices[0].logprobs or not response.choices[0].logprobs.content:
+        print("[DEBUG] No logprobs content — Ollama may not support logprobs for this model.")
+        return "Error: No logprobs returned."
+
+    all_probs = []   # (chosen_prob, margin, chosen_token, runner_up_token)
+    total_logprob = 0.0
+    token_count = 0
+    full_text = ""
+
+    # Tracking variables for our scorecard
+    min_prob = 100.0
+    weakest_token = ""
+    weak_token_count = 0
+    min_margin = 100.0
+    min_margin_chosen = ""
+    min_margin_runner = ""
+
+    for token_info in response.choices[0].logprobs.content:
+        token_str = token_info.token
+        logp = token_info.logprob
+
+        linear_prob = math.exp(logp) * 100
+
+        # Extract runner-up: sort top_logprobs by prob descending, skip duplicates
+        runner_up_prob = None
+        runner_up_token = ""
+        if token_info.top_logprobs and len(token_info.top_logprobs) > 1:
+            sorted_top = sorted(token_info.top_logprobs, key=lambda t: t.logprob, reverse=True)
+            best_prob = math.exp(sorted_top[0].logprob) * 100
+            best_token = sorted_top[0].token
+            for candidate in sorted_top[1:]:
+                if candidate.token != best_token:
+                    runner_up_prob = math.exp(candidate.logprob) * 100
+                    runner_up_token = candidate.token
+                    break
+
+        margin = (best_prob - runner_up_prob) if runner_up_prob is not None else None
+        all_probs.append((linear_prob, margin, token_str, runner_up_token, runner_up_prob))
+
+        # Track the absolute lowest confidence token
+        if linear_prob < min_prob:
+            min_prob = linear_prob
+            weakest_token = token_str
+
+        # Track the narrowest decision margin
+        if margin is not None and margin < min_margin:
+            min_margin = margin
+            min_margin_chosen = token_str
+            min_margin_runner = runner_up_token
+
+        # Count how many tokens fall below our enterprise risk threshold
+        if linear_prob < risk_threshold:
+            weak_token_count += 1
+
+        total_logprob += logp
+        token_count += 1
+        full_text += token_str
+
+    # Calculate overall sequence confidence
+    normalized_logprob = total_logprob / token_count
+    sequence_confidence = math.exp(normalized_logprob) * 100
+
+    # Calculate risk density
+    risk_density = (weak_token_count / token_count) * 100
+
+    # ── Snowball detection ───────────────────────────────────────────────
+    # Must run before adjusted score so we know which post-pivot tokens
+    # to correct. pivot_for_index maps token index → lowest pivot prob
+    # covering it (handles overlapping windows conservatively).
+    SNOWBALL_WINDOW        = 8
+    SNOWBALL_MIN_WINDOW    = 3
+    SNOWBALL_MARGIN_THRESH = 10.0
+    SNOWBALL_LIFT_THRESH   = 15.0
+
+    snowballs = []
+    pivot_for_index = {}
+
+    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
+        is_low_prob   = prob < risk_threshold
+        is_close_call = margin is not None and margin < SNOWBALL_MARGIN_THRESH
+        if not (is_low_prob or is_close_call):
+            continue
+        window = all_probs[i + 1 : i + 1 + SNOWBALL_WINDOW]
+        if len(window) < SNOWBALL_MIN_WINDOW:
+            continue
+        post_avg = sum(w[0] for w in window) / len(window)
+        lift = post_avg - sequence_confidence
+        if lift >= SNOWBALL_LIFT_THRESH:
+            post_text = "".join(w[2] for w in window)
+            snowballs.append((lift, i, prob, margin, tok, runner, runner_prob, post_avg, post_text))
+            for j in range(i + 1, min(i + 1 + SNOWBALL_WINDOW, len(all_probs))):
+                if j not in pivot_for_index or prob < pivot_for_index[j]:
+                    pivot_for_index[j] = prob
+
+    # ── Adjusted Sequence Score ──────────────────────────────────────────
+    # Three corrections applied on top of the raw geometric mean:
+    #
+    #   1. Glue exclusion   — tokens above GLUE_CEILING are near-certain
+    #                         structural words that dilute the mean without
+    #                         carrying factual information.
+    #
+    #   2. Snowball correction — post-pivot tokens are capped at the pivot's
+    #                         probability. Their high confidence is conditioned
+    #                         on the uncertain choice, not earned independently.
+    #
+    #   3. Margin weighting — tokens with a narrow decision margin are down-
+    #                         weighted. A 52% token with a 51% runner-up is
+    #                         genuinely less reliable than a 52% token chosen
+    #                         decisively from a flat field.
+    GLUE_CEILING          = 98.0
+    MARGIN_PENALTY_THRESH = 20.0
+
+    adj_logp_total   = 0.0
+    adj_weight_total = 0.0
+
+    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
+        # 1. Exclude glue words
+        if prob > GLUE_CEILING:
+            continue
+        # 2. Snowball correction
+        effective_prob = min(prob, pivot_for_index[i]) if i in pivot_for_index else prob
+        logp = math.log(max(effective_prob, 0.01) / 100)
+        # 3. Margin weighting
+        if margin is not None and margin < MARGIN_PENALTY_THRESH:
+            weight = 0.5 + (margin / (MARGIN_PENALTY_THRESH * 2))
+        else:
+            weight = 1.0
+        adj_logp_total   += weight * logp
+        adj_weight_total += weight
+
+    adjusted_confidence = math.exp(adj_logp_total / adj_weight_total) * 100 if adj_weight_total > 0 else 0.0
+
+    # Output the Scorecard
+    print(f"Generated Text: {full_text.strip()}\n" + "="*60)
+    print("CONFIDENCE SCORECARD")
+    print(
+        "  Each metric looks at model certainty from a different angle.\n"
+        "  Together they answer: 'Should I trust this response?'"
+    )
+    print("-" * 60)
+
+    # 1. Overall Score and Adjusted Score
+    delta = adjusted_confidence - sequence_confidence
+    delta_str = f"{delta:+.2f}%"
+    print(f"Overall Sequence Score:   {sequence_confidence:.2f}%  →  Adjusted: {adjusted_confidence:.2f}%  ({delta_str})")
+    print(
+        "  Overall  = geometric mean of all token probabilities. Fast read on\n"
+        "             average confidence, but inflated by glue words and snowballs.\n"
+        "  Adjusted = same mean after three corrections:\n"
+        "             • Glue exclusion  — removes tokens >98% (structural words\n"
+        "               that carry no factual signal, e.g. 'the', 'and', 'is').\n"
+        "             • Snowball correction — post-pivot tokens are capped at the\n"
+        "               pivot's probability; their certainty was not earned freely.\n"
+        "             • Margin weighting — near coin-flip tokens are down-weighted\n"
+        "               relative to tokens chosen decisively.\n"
+        f"  A large negative delta (e.g. >10%) means the raw score was significantly\n"
+        f"  flattered. The adjusted score is the more conservative trust signal."
+    )
+
+    # 2. The Weakest Link Score (Crucial for circuit breakers)
+    alert = "⚠️ TRIPS CIRCUIT BREAKER" if min_prob < risk_threshold else "✅ PASS"
+    print(f"\nWeakest Link Score:       {min_prob:.2f}% (Token: {repr(weakest_token)}) {alert}")
+    print(
+        f"  The single lowest-confidence token in the entire response.\n"
+        f"  This is the circuit breaker metric: one catastrophically uncertain token\n"
+        f"  can corrupt everything that follows it (the hallucination snowball effect).\n"
+        f"  Threshold is {risk_threshold}% — anything below fires the alert."
+    )
+
+    # 3. Risk Density
+    print(f"\nRisk Density:             {risk_density:.1f}% of tokens are below {risk_threshold}% threshold.")
+    print(
+        f"  What fraction of the response was generated with low confidence?\n"
+        f"  A single weak token may be a proper noun or unusual word — normal.\n"
+        f"  High risk density (>20%) means uncertainty is widespread, not isolated."
+    )
+
+    # 4. Narrowest Decision Margin
+    if min_margin < 100.0:
+        margin_alert = "⚠️ COIN FLIP" if min_margin < 5.0 else "✅ PASS"
+        print(f"\nNarrowest Margin:         {min_margin:.2f}% ({repr(min_margin_chosen)} vs {repr(min_margin_runner)}) {margin_alert}")
+        print(
+            "  The smallest gap between the chosen token and its closest competitor.\n"
+            "  A near-zero margin means the model was genuinely torn — the response\n"
+            "  could easily have gone a different way at that point. This is especially\n"
+            "  dangerous on factual tokens like dates, names, or numbers."
+        )
+    print("="*60)
+
+    # Token Probability Distribution histogram (by chosen probability)
+    print(
+        "\nTOKEN PROBABILITY DISTRIBUTION\n"
+        "  Each row is a 10% probability band. The bar shows what proportion of\n"
+        "  tokens fell into that band. The token shown is the least confident\n"
+        "  example from that band — the one closest to the lower edge.\n"
+        "\n"
+        "  HOW TO READ THIS:\n"
+        "    90-100%  ████████████  — Model was certain. Grammar, common words,\n"
+        "                             repeated proper nouns. Expected to dominate.\n"
+        "    50- 90%  ███           — Some uncertainty. The model had options but\n"
+        "                             leaned toward one. Usually acceptable.\n"
+        "     0- 50%  █             — Model was genuinely unsure. Unusual words,\n"
+        "                             contested facts, or hallucination territory.\n"
+        "\n"
+        "  WHAT TO LOOK FOR:\n"
+        "    Good  — A tall 90-100% bar with thin or empty lower bands.\n"
+        "    Warn  — Visible bars across 20-70%, meaning widespread uncertainty.\n"
+        "    Bad   — A flat or spread-out distribution, or a significant 0-10% bar."
+    )
+    print("-" * 60)
+    buckets = [(i, i + 10) for i in range(0, 100, 10)]
+    bar_max_width = 40
+    bucket_tokens = [[] for _ in buckets]
+    for prob, margin, tok, runner, runner_prob in all_probs:
+        idx = min(int(prob // 10), 9)
+        bucket_tokens[idx].append((prob, margin, tok, runner))
+
+    for (lo, hi), tokens in zip(buckets, bucket_tokens):
+        count = len(tokens)
+        bar_width = int((count / token_count) * bar_max_width)
+        bar = "█" * bar_width
+        pct = (count / token_count) * 100
+        example = repr(min(tokens, key=lambda x: x[0])[2]) if tokens else ""
+        print(f"  {lo:3d}-{hi:3d}%  {bar:<{bar_max_width}}  {count:3d} tokens ({pct:4.1f}%)  {example}")
+    print("-" * 60)
+
+    # Post-histogram interpretation based on the actual distribution
+    high_pct = (len(bucket_tokens[9]) / token_count) * 100
+    low_pct  = sum(len(bucket_tokens[i]) for i in range(5)) / token_count * 100
+    if high_pct >= 70:
+        shape_comment = f"  ✅ {high_pct:.0f}% of tokens are in the 90-100% band — the model was largely certain."
+    elif high_pct >= 50:
+        shape_comment = f"  🟡 {high_pct:.0f}% of tokens are in the 90-100% band — moderate confidence overall."
+    else:
+        shape_comment = f"  ⚠️  Only {high_pct:.0f}% of tokens are in the 90-100% band — confidence is broadly low."
+    print(shape_comment)
+    if low_pct > 10:
+        print(f"  ⚠️  {low_pct:.0f}% of tokens are below 50% confidence — investigate the example tokens above.")
+
+    # Token Gap Chart — sentence progression view
+    print(
+        "\nTOKEN GAP CHART — sentence progression\n"
+        "  Each row is one token in generation order. The bar shows the gap\n"
+        "  between the chosen token's probability and the next-best alternative.\n"
+        "  A long bar means the model was decisive; a short/empty bar means it\n"
+        "  nearly chose something else at that point.\n"
+        "\n"
+        "  HOW TO READ THIS:\n"
+        "    Long bar  ████████  — Large gap, confident choice. Low risk.\n"
+        "    Short bar ██        — Small gap, model was torn. Check the token.\n"
+        "    No bar              — No runner-up data or margin ≈ 0%.\n"
+        "    ⚠️  flags gaps below 5% on any token.\n"
+        "\n"
+        "  WHAT TO LOOK FOR:\n"
+        "    Clusters of short bars indicate regions of sustained uncertainty.\n"
+        "    A sudden dip on a factual word (name, date, number) is a red flag."
+    )
+    print("-" * 60)
+    gap_bar_max = 30
+    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
+        gap = margin if margin is not None else 0.0
+        bar_width = int((gap / 100.0) * gap_bar_max)
+        bar = "█" * bar_width
+        flag = " ⚠️" if margin is not None and margin < 5.0 else ""
+        token_display = repr(tok)
+        if margin is not None:
+            runner_display = repr(runner)
+            print(f"  {i:3d}  {token_display:<20}  {bar:<{gap_bar_max}}  gap {gap:5.1f}%  (vs {runner_display}){flag}")
+        else:
+            print(f"  {i:3d}  {token_display:<20}  {'·':<{gap_bar_max}}    n/a")
+    print("-" * 60)
+
+    # Post-chart interpretation
+    low_gap_tokens = [(i, prob, margin, tok, runner) for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs) if margin is not None and margin < 10.0]
+    if low_gap_tokens:
+        print(f"  ⚠️  {len(low_gap_tokens)} token(s) had a gap below 10% — the model was indecisive at these points.")
+        # Identify runs of consecutive low-gap tokens
+        runs = []
+        current_run = [low_gap_tokens[0]]
+        for item in low_gap_tokens[1:]:
+            if item[0] == current_run[-1][0] + 1:
+                current_run.append(item)
+            else:
+                if len(current_run) >= 2:
+                    runs.append(current_run)
+                current_run = [item]
+        if len(current_run) >= 2:
+            runs.append(current_run)
+        if runs:
+            print(f"  ⚠️  {len(runs)} cluster(s) of consecutive low-gap tokens detected:")
+            for run in runs:
+                start_idx = run[0][0]
+                end_idx = run[-1][0]
+                cluster_text = "".join(r[3] for r in run)
+                print(f"      Tokens {start_idx}-{end_idx}: {repr(cluster_text)}")
+    else:
+        print("  ✅ All tokens had a gap of 10% or more — consistently decisive choices.")
+
+    # Decision Margin histogram (by margin between chosen and runner-up)
+    margins_available = [(prob, margin, tok, runner, runner_prob) for prob, margin, tok, runner, runner_prob in all_probs if margin is not None]
+    if margins_available:
+        print(
+            "\nDECISION MARGIN DISTRIBUTION  (chosen prob − runner-up prob)\n"
+            "  This histogram shows the GAP between what the model chose and its\n"
+            "  closest alternative — not how confident it was, but how decisive.\n"
+            "  A token can be low-probability yet still decisive (no close rival).\n"
+            "  A token can be high-probability yet still a near coin-flip.\n"
+            "\n"
+            "  HOW TO READ THIS:\n"
+            "    90-100%  ████  — Landslide decisions. The chosen token was the\n"
+            "                     only real option. Very low hallucination risk.\n"
+            "    10- 90%  ███   — Clear preference but alternatives existed.\n"
+            "                     Normal for ambiguous phrasing choices.\n"
+            "     0- 10%  █     — Near coin-flip. The model almost chose something\n"
+            "                     else. High risk if on a factual word.\n"
+            "\n"
+            "  WHAT TO LOOK FOR:\n"
+            "    Good  — Most mass in the 70-100% range (decisive choices).\n"
+            "    Warn  — A visible 0-10% bar, especially if the example tokens\n"
+            "             shown are dates, names, numbers, or key facts.\n"
+            "    Bad   — A large 0-10% bar combined with a low Weakest Link score.\n"
+            "             The Narrowest Margins table below will identify the culprits."
+        )
+        print("-" * 60)
+        margin_buckets = [[] for _ in buckets]
+        for prob, margin, tok, runner, runner_prob in margins_available:
+            idx = min(int(margin // 10), 9)
+            margin_buckets[idx].append((margin, prob, tok, runner))
+
+        for (lo, hi), tokens in zip(buckets, margin_buckets):
+            count = len(tokens)
+            bar_width = int((count / token_count) * bar_max_width)
+            bar = "█" * bar_width
+            pct = (count / token_count) * 100
+            example = repr(min(tokens, key=lambda x: x[0])[2]) if tokens else ""
+            print(f"  {lo:3d}-{hi:3d}%  {bar:<{bar_max_width}}  {count:3d} tokens ({pct:4.1f}%)  {example}")
+        print("-" * 60)
+
+        # Post-histogram interpretation based on the actual margin distribution
+        coin_flip_count = len(margin_buckets[0])
+        coin_flip_pct   = (coin_flip_count / token_count) * 100
+        decisive_count  = sum(len(margin_buckets[i]) for i in range(7, 10))
+        decisive_pct    = (decisive_count / token_count) * 100
+        if coin_flip_pct > 10:
+            print(f"  ⚠️  {coin_flip_pct:.0f}% of tokens had a margin below 10% — many near coin-flip decisions.")
+            print( "      Check the Narrowest Margins table to see if any fall on factual words.")
+        else:
+            print(f"  ✅ Only {coin_flip_pct:.0f}% of tokens had a margin below 10% — most choices were decisive.")
+        if decisive_pct >= 50:
+            print(f"  ✅ {decisive_pct:.0f}% of tokens had a margin above 70% — strong decisiveness overall.")
+
+    # Bottom 10 narrowest-margin tokens
+    print(
+        "\nNARROWEST MARGINS — closest decisions (top 10)\n"
+        "  These are the tokens where the model most nearly chose something else.\n"
+        "  Chosen = probability of the token actually generated.\n"
+        "  Runner = probability of the next-best alternative the model considered.\n"
+        "  Margin = the gap between them. Small margins on factual words (dates,\n"
+        "  names, numbers) are the strongest hallucination signal in this report.\n"
+        "  ⚠️  flags margins below 5% — effectively a coin flip."
+    )
+    print("-" * 60)
+    print(f"  {'Chosen':>6}  {'Runner':>6}  {'Margin':>6}  {'Chosen token':<20}  Runner-up token")
+    print(f"  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*20}  {'-'*20}")
+    for prob, margin, tok, runner, runner_prob in sorted(margins_available, key=lambda x: x[1])[:10]:
+        flag = " ⚠️" if margin < 5.0 else ""
+        print(f"  {prob:5.1f}%  {runner_prob:5.1f}%  {margin:5.1f}%  {repr(tok):<20}  {repr(runner)}{flag}")
+    print("="*60)
+
+    # Snowball Effect Analysis — snowballs already computed in calculation section above
+    print(
+        "\nSNOWBALL EFFECT ANALYSIS\n"
+        "  A 'snowball' is a pivot token — one the model was uncertain about —\n"
+        "  immediately followed by a run of high-confidence tokens. This matters\n"
+        "  because the model has locked in on its uncertain choice and is now\n"
+        "  confidently building on it. The text after the pivot may be fluent\n"
+        "  and certain while still being wrong.\n"
+        "\n"
+        "  HOW TO READ THIS:\n"
+        "    Pivot    — the uncertain token where the path forked.\n"
+        "    Chosen%  — confidence in the pivot token itself.\n"
+        "    Margin   — gap to the runner-up (small = near coin-flip).\n"
+        "    PostAvg  — average confidence of the next 8 tokens.\n"
+        "    Lift     — how much PostAvg exceeds the response average.\n"
+        "               A high lift means the model became MORE certain after\n"
+        "               an uncertain choice — the classic snowball signature.\n"
+        "    Context  — the tokens that immediately followed the pivot.\n"
+        "\n"
+        "  WHAT TO LOOK FOR:\n"
+        "    High lift + low chosen% on a factual word = highest risk.\n"
+        "    The model guessed, then committed. Verify that specific claim."
+    )
+    print("-" * 60)
+
+    if not snowballs:
+        print("  ✅ No snowball patterns detected.")
+    else:
+        print(f"  ⚠️  {len(snowballs)} potential snowball(s) found — review the pivot tokens below.\n")
+        print(f"  {'Pos':>4}  {'Chosen%':>7}  {'Margin':>7}  {'PostAvg':>7}  {'Lift':>6}  Pivot token → Context")
+        print(f"  {'-'*4}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*6}  {'-'*40}")
+        for lift, pos, prob, margin, tok, runner, runner_prob, post_avg, post_text in sorted(snowballs, key=lambda x: -x[0]):
+            margin_str = f"{margin:6.1f}%" if margin is not None else "   n/a "
+            flag = " ⚠️" if (margin is not None and margin < 5.0) or prob < 20.0 else ""
+            context = repr(post_text[:40])
+            print(f"  {pos:4d}  {prob:6.1f}%  {margin_str}  {post_avg:6.1f}%  {lift:+5.1f}%  {repr(tok)} → {context}{flag}")
+    print("="*60)
+
+# Let's test it with a prompt that requires specific retrieval
+test_prompt = "What was the exact date and location of the signing of the Treaty of Waitangi?"
+generate_confidence_scorecard(test_prompt)
