@@ -91,15 +91,14 @@ MODEL    = "gpt-4o"
 
 Set `BASE_URL = "https://api.openai.com/v1"` and provide your API key.
 
-**Model compatibility note:** `top_logprobs` combined with `temperature=0.0` triggers HTTP 500 errors on some specific `gpt-4o` snapshots. Use a stable named snapshot rather than the floating `gpt-4o` alias if you hit this:
+**Model compatibility note:** `top_logprobs` combined with `temperature=0.0` triggers HTTP 500 errors on some specific `gpt-5` version. 
 
 | Model | logprobs | Status |
 |---|---|---|
 | `gpt-4o` (latest) | ✅ | Confirmed working |
 | `gpt-5`  | ⚠️ | May 500 on `top_logprobs=2` + `temperature=0.0` |
-| `gpt-4o-mini` | ✅ | Works |
 
-If you receive an `InternalServerError: 500`, switch to a different model snapshot. Include the `request ID` from the error message if raising a support ticket with OpenAI.
+If you receive an `InternalServerError: 500`, switch to a different model version. Include the `request ID` from the error message if raising a support ticket with OpenAI.
 
 ### Ollama (local)
 
