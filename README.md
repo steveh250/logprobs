@@ -7,7 +7,11 @@ A Python tool for measuring LLM generation stability and hallucination risk usin
 
 When an LLM generates text, it doesn't just pick words — it calculates a probability distribution over its entire vocabulary at every step and samples from it. The API can return these raw probabilities (`logprobs`), giving us a mathematical window into how certain the model was about each word it generated.
 
-This tool analyses those probabilities and produces a Confidence Scorecard designed to answer a narrower and more useful question:
+This repo contains two scripts:
+- **`logprobs-1`** — the original Confidence Scorecard with histograms, margin tables, and snowball detection.
+- **`logprobs-2`** — everything in `logprobs-1` plus a **Token Gap Chart** that visualises the margin between chosen and runner-up tokens as a column chart across the sentence.
+
+Both analyse token probabilities and produce a Confidence Scorecard designed to answer a narrower and more useful question:
 
 **Did the model generate this response along a stable path, or did it make fragile choices that increase the risk of hallucination?**
 
@@ -75,7 +79,7 @@ Raw probability alone doesn't reveal how close a decision was. A token chosen at
 pip install openai
 ```
 
-**Configuration** — edit the top of `logprobs-1` to point at your backend:
+**Configuration** — edit the top of `logprobs-1` or `logprobs-2` to point at your backend:
 
 ```python
 BASE_URL = "https://api.openai.com/v1"
@@ -121,10 +125,11 @@ MODEL    = "llama3.1:8b"
 ## Running
 
 ```bash
-python logprobs-1
+python logprobs-1       # Original scorecard
+python logprobs-2       # Scorecard + Token Gap Chart
 ```
 
-Edit `test_prompt` at the bottom of the script to change the query.
+Both scripts share the same scorecard output. `logprobs-2` adds the Token Gap Chart section (see below). Edit `test_prompt` at the bottom of either script to change the query.
 
 ---
 
@@ -204,6 +209,55 @@ NARROWEST MARGINS — closest decisions (top 10)
    18.4%   17.2%   1.2%  ' around'             ' approximately'
    29.6%   24.8%   4.8%  ','                   '.'
 ```
+
+### Token Gap Chart (logprobs-2 only)
+
+`logprobs-2` adds a **Token Gap Chart** — a column-based visualisation that shows the margin between the chosen token and the runner-up for every token in sentence order. This makes it easy to see confidence expanding and contracting as the response progresses.
+
+```
+TOKEN GAP CHART — sentence progression
+--------------------------------------------------------------------------------
+100% │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+     │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+     │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓    ▓▓▓▓
+     │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓    ▓▓▓▓
+ 60% │▓▓▓▓    ▓▓▓▓        ▓▓▓▓    ▓▓▓▓
+     │▓▓▓▓    ▓▓▓▓        ▓▓▓▓    ▓▓▓▓
+     │▓▓▓▓                ▓▓▓▓
+     │▓▓▓▓                ▓▓▓▓
+ 20% │▓▓▓▓░░░░    ░░░░    ▓▓▓▓░░░░
+     │░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     │────────────────────────────
+      0   1   2   3   4   5   6
+      The  of  Wait sign 1840 ,
+      80% 12% 45% n/a ⚠3  62% 90%
+```
+
+**Anatomy of a column:**
+
+| Zone | Symbol | Meaning |
+|---|---|---|
+| Upper block | `▓▓` | Chosen token probability — fills **down** from 100%. A tall `▓` block means the model assigned high probability to the token it chose. |
+| White gap | (space) | The **margin** between chosen and runner-up. This is the key visual — watch it expand and contract across the sentence. |
+| Lower block | `░░` | Runner-up token probability — fills **up** from 0%. A tall `░` block means the second-best alternative was also quite probable. |
+
+**Reading the chart:**
+
+| Pattern | What it means |
+|---|---|
+| Wide gap (`▓` and `░` far apart) | The model was decisive — it strongly preferred one token. Low hallucination risk. |
+| Narrow gap (`▓` and `░` nearly touching) | The model was torn between two options. If this falls on a factual word, treat it as suspect. |
+| No gap (`▓` and `░` merge) | A near coin-flip. The response could easily have diverged here. |
+| Both blocks short, wide gap | Neither token was very probable — the model spread probability across many candidates. Decisive between top two, but uncertain overall. |
+
+**What to look for:**
+- **Clusters of narrow-gap columns** — the model was guessing through an entire phrase, not just one token.
+- **A sudden squeeze on a factual word** (name, date, number) — the strongest hallucination signal in the chart.
+- **A wide gap following a narrow gap** — may indicate a snowball: the model committed to an uncertain choice and then became confidently wrong.
+
+Below each chart chunk, three label rows show the token index, the token text, and the margin percentage (`⚠` flags margins below 5%).
+
+After the chart, a **Chart Interpretation Summary** reports the average margin, counts of decisive vs coin-flip tokens, cluster detection for consecutive low-gap runs, and an overall assessment.
 
 ---
 
