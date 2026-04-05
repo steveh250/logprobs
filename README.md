@@ -265,6 +265,17 @@ After the chart, a **Chart Interpretation Summary** reports the average margin, 
 
 The snowball section identifies **pivot tokens** — uncertain choices that were immediately followed by a run of high-confidence tokens. This is the hallucination snowball signature: the model committed to a low-confidence guess and then confidently built on it.
 
+### Pivot selection
+
+A token qualifies as a potential pivot if **either** condition is true:
+
+| Condition | Rule | Example |
+|---|---|---|
+| **Low probability** | Chosen% is below the risk threshold (default 80%) | A 72% token with a 44% margin qualifies — its absolute confidence is below the bar, even though the margin is wide |
+| **Close call** | Margin to the runner-up is < 10% | A 90% token with a 3% margin qualifies — the alternative was almost as likely, even though the absolute probability is high |
+
+Once a token qualifies as a pivot, the next 8 tokens are examined. If their average confidence exceeds the overall response average by ≥ 15% (the **lift** threshold), a snowball is flagged.
+
 ```
 SNOWBALL EFFECT ANALYSIS
 ------------------------------------------------------------

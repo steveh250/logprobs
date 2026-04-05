@@ -117,6 +117,17 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
     # Must run before adjusted score so we know which post-pivot tokens
     # to correct. pivot_for_index maps token index → lowest pivot prob
     # covering it (handles overlapping windows conservatively).
+    #
+    # Pivot selection — a token qualifies as a potential pivot if EITHER:
+    #   (a) is_low_prob:   its probability < risk_threshold (default 80%), OR
+    #   (b) is_close_call: its margin to the runner-up < SNOWBALL_MARGIN_THRESH.
+    # Only one condition must be true. A 72% token with a huge margin still
+    # qualifies via (a) because 72 < 80. A 90% token with a 3% margin
+    # qualifies via (b) because 3 < 10, even though 90 > 80.
+    #
+    # Once a token qualifies as a pivot, it must also pass the lift test:
+    # the average probability of the next SNOWBALL_WINDOW tokens must exceed
+    # the overall sequence confidence by at least SNOWBALL_LIFT_THRESH.
     SNOWBALL_WINDOW        = 8
     SNOWBALL_MIN_WINDOW    = 3
     SNOWBALL_MARGIN_THRESH = 10.0
@@ -367,8 +378,17 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
         "  confidently building on it. The text after the pivot may be fluent\n"
         "  and certain while still being wrong.\n"
         "\n"
-        "  HOW TO READ THIS:\n"
-        "    Pivot    — the uncertain token where the path forked.\n"
+        "  PIVOT SELECTION (a token qualifies if EITHER condition is true):\n"
+        "    • Low probability — chosen% is below the risk threshold (default\n"
+        "      80%). Even a token with a wide margin qualifies if its absolute\n"
+        "      confidence is below this bar.\n"
+        "    • Close call — margin to the runner-up is < 10%, regardless of\n"
+        "      the token's absolute probability.\n"
+        "  Once a pivot qualifies, the next 8 tokens are checked: if their\n"
+        "  average confidence exceeds the response average by ≥15% (the lift\n"
+        "  threshold), a snowball is flagged.\n"
+        "\n"
+        "  HOW TO READ THE TABLE:\n"
         "    Chosen%  — confidence in the pivot token itself.\n"
         "    Margin   — gap to the runner-up (small = near coin-flip).\n"
         "    PostAvg  — average confidence of the next 8 tokens.\n"
