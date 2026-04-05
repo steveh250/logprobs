@@ -581,6 +581,304 @@ def generate_confidence_scorecard(prompt, model=MODEL, risk_threshold=80.0):
             print(f"  {pos:4d}  {prob:6.1f}%  {margin_str}  {post_avg:6.1f}%  {lift:+5.1f}%  {repr(tok)} → {context}{flag}")
     print("="*60)
 
+    # ── Generate self-contained HTML file ───────────────────────────────
+    html_filename = "logprobs_output.html"
+    _generate_html_report(html_filename, prompt, full_text.strip(), all_probs,
+                          sequence_confidence, adjusted_confidence,
+                          min_prob, weakest_token, risk_density, risk_threshold,
+                          min_margin, min_margin_chosen, min_margin_runner,
+                          snowballs)
+    print(f"\n  HTML report saved to: {html_filename}")
+
+
+def _generate_html_report(filename, prompt, generated_text, all_probs,
+                          sequence_confidence, adjusted_confidence,
+                          min_prob, weakest_token, risk_density, risk_threshold,
+                          min_margin, min_margin_chosen, min_margin_runner,
+                          snowballs):
+    """Write a self-contained HTML file visualising the token gap chart."""
+    import html as html_mod
+    import json
+
+    # Prepare token data for JS
+    tokens_js = []
+    for i, (prob, margin, tok, runner, runner_prob) in enumerate(all_probs):
+        tokens_js.append({
+            "index": i,
+            "token": tok,
+            "chosen_prob": round(prob, 2),
+            "runner_up_prob": round(runner_prob, 2) if runner_prob is not None else 0,
+            "runner_token": runner,
+            "margin": round(margin, 2) if margin is not None else None,
+        })
+
+    snowballs_js = []
+    for lift, pos, prob, margin, tok, runner, runner_prob, post_avg, post_text in snowballs:
+        snowballs_js.append({
+            "pos": pos,
+            "prob": round(prob, 2),
+            "margin": round(margin, 2) if margin is not None else None,
+            "post_avg": round(post_avg, 2),
+            "lift": round(lift, 2),
+            "token": tok,
+            "context": post_text[:40],
+        })
+
+    tokens_json = json.dumps(tokens_js)
+    snowballs_json = json.dumps(snowballs_js)
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Logprobs Confidence Report</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }}
+  h1 {{ color: #58a6ff; margin-bottom: 4px; font-size: 1.4em; }}
+  h2 {{ color: #58a6ff; margin: 24px 0 12px; font-size: 1.15em; border-bottom: 1px solid #21262d; padding-bottom: 6px; }}
+  .prompt {{ color: #8b949e; font-style: italic; margin-bottom: 16px; font-size: 0.9em; }}
+  .generated {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 16px; font-size: 0.9em; white-space: pre-wrap; }}
+  .scorecard {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }}
+  .metric {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }}
+  .metric .label {{ color: #8b949e; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.5px; }}
+  .metric .value {{ font-size: 1.5em; font-weight: 700; margin-top: 4px; }}
+  .metric .detail {{ color: #8b949e; font-size: 0.78em; margin-top: 4px; }}
+  .pass {{ color: #3fb950; }}
+  .warn {{ color: #d29922; }}
+  .fail {{ color: #f85149; }}
+
+  /* Chart container */
+  .chart-wrapper {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin-bottom: 16px; }}
+  .chart-scroll {{ overflow-x: auto; overflow-y: hidden; padding-bottom: 8px; }}
+  .chart-scroll::-webkit-scrollbar {{ height: 8px; }}
+  .chart-scroll::-webkit-scrollbar-track {{ background: #21262d; border-radius: 4px; }}
+  .chart-scroll::-webkit-scrollbar-thumb {{ background: #484f58; border-radius: 4px; }}
+  .chart-scroll::-webkit-scrollbar-thumb:hover {{ background: #6e7681; }}
+
+  .chart-area {{ display: flex; align-items: flex-end; position: relative; }}
+  .y-axis {{ display: flex; flex-direction: column; justify-content: space-between; height: 300px; margin-right: 4px; flex-shrink: 0; }}
+  .y-axis span {{ font-size: 10px; color: #484f58; text-align: right; min-width: 32px; }}
+  .columns-container {{ display: flex; align-items: stretch; height: 300px; position: relative; }}
+
+  .token-col {{ display: flex; flex-direction: column; align-items: center; width: 38px; min-width: 38px; flex-shrink: 0; position: relative; height: 100%; cursor: pointer; }}
+  .token-col:hover {{ background: rgba(88,166,255,0.06); }}
+  .token-col .bar-area {{ width: 100%; height: 100%; position: relative; }}
+  .token-col .chosen-bar {{ position: absolute; top: 0; left: 4px; right: 4px; background: #3fb950; border-radius: 2px 2px 0 0; }}
+  .token-col .runner-bar {{ position: absolute; bottom: 0; left: 4px; right: 4px; background: #f0883e; border-radius: 0 0 2px 2px; }}
+  .token-col .snowball-marker {{ position: absolute; top: -2px; left: 50%; transform: translateX(-50%); width: 8px; height: 8px; background: #f85149; border-radius: 50%; z-index: 2; }}
+
+  .labels-row {{ display: flex; }}
+  .labels-row .cell {{ width: 38px; min-width: 38px; flex-shrink: 0; text-align: center; font-size: 9px; padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .labels-row.index-row .cell {{ color: #484f58; }}
+  .labels-row.token-row .cell {{ color: #c9d1d9; font-family: monospace; }}
+  .labels-row.margin-row .cell {{ color: #8b949e; }}
+  .labels-row.margin-row .cell.coin-flip {{ color: #f85149; font-weight: 700; }}
+
+  /* Tooltip */
+  .tooltip {{ display: none; position: fixed; background: #1c2128; border: 1px solid #444c56; border-radius: 6px; padding: 10px 14px; font-size: 12px; z-index: 1000; pointer-events: none; box-shadow: 0 4px 12px rgba(0,0,0,0.4); max-width: 280px; }}
+  .tooltip .tt-token {{ font-family: monospace; font-size: 14px; color: #58a6ff; margin-bottom: 4px; }}
+  .tooltip .tt-row {{ display: flex; justify-content: space-between; gap: 16px; margin-top: 2px; }}
+  .tooltip .tt-label {{ color: #8b949e; }}
+  .tooltip .tt-value {{ font-weight: 600; }}
+
+  /* Legend */
+  .legend {{ display: flex; gap: 20px; margin: 8px 0 4px; font-size: 0.8em; color: #8b949e; }}
+  .legend span {{ display: flex; align-items: center; gap: 5px; }}
+  .legend .swatch {{ width: 14px; height: 14px; border-radius: 2px; display: inline-block; }}
+  .swatch.chosen {{ background: #3fb950; }}
+  .swatch.runner {{ background: #f0883e; }}
+  .swatch.snowball {{ background: #f85149; border-radius: 50%; width: 10px; height: 10px; }}
+
+  /* Snowball table */
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.85em; }}
+  th {{ text-align: left; color: #8b949e; font-weight: 600; padding: 6px 10px; border-bottom: 1px solid #30363d; }}
+  td {{ padding: 6px 10px; border-bottom: 1px solid #21262d; }}
+  tr:hover td {{ background: #161b22; }}
+</style>
+</head>
+<body>
+
+<h1>Logprobs Confidence Report</h1>
+<div class="prompt">Prompt: {html_mod.escape(prompt)}</div>
+<div class="generated">{html_mod.escape(generated_text)}</div>
+
+<div class="scorecard">
+  <div class="metric">
+    <div class="label">Sequence Score (Raw &rarr; Adjusted)</div>
+    <div class="value">{sequence_confidence:.1f}% &rarr; {adjusted_confidence:.1f}%</div>
+    <div class="detail">Delta: {adjusted_confidence - sequence_confidence:+.1f}%</div>
+  </div>
+  <div class="metric">
+    <div class="label">Weakest Link</div>
+    <div class="value {'fail' if min_prob < risk_threshold else 'pass'}">{min_prob:.1f}%</div>
+    <div class="detail">Token: {html_mod.escape(repr(weakest_token))}</div>
+  </div>
+  <div class="metric">
+    <div class="label">Risk Density</div>
+    <div class="value {'fail' if risk_density > 20 else 'warn' if risk_density > 10 else 'pass'}">{risk_density:.1f}%</div>
+    <div class="detail">Tokens below {risk_threshold:.0f}% threshold</div>
+  </div>
+  <div class="metric">
+    <div class="label">Narrowest Margin</div>
+    <div class="value {'fail' if min_margin < 5 else 'warn' if min_margin < 15 else 'pass'}">{min_margin:.1f}%</div>
+    <div class="detail">{html_mod.escape(repr(min_margin_chosen))} vs {html_mod.escape(repr(min_margin_runner))}</div>
+  </div>
+</div>
+
+<h2>Token Gap Chart</h2>
+<div class="chart-wrapper">
+  <div class="legend">
+    <span><span class="swatch chosen"></span> Chosen token probability</span>
+    <span><span class="swatch runner"></span> Runner-up probability</span>
+    <span><span class="swatch snowball"></span> Snowball pivot</span>
+    <span style="color:#484f58;">Gap = white space between bars</span>
+  </div>
+  <div class="chart-scroll" id="chartScroll">
+    <div class="chart-area">
+      <div class="y-axis" id="yAxis"></div>
+      <div class="columns-container" id="columns"></div>
+    </div>
+    <div class="labels-row index-row" id="indexRow"></div>
+    <div class="labels-row token-row" id="tokenRow"></div>
+    <div class="labels-row margin-row" id="marginRow"></div>
+  </div>
+</div>
+
+<div id="snowballSection"></div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const TOKENS = {tokens_json};
+const SNOWBALLS = {snowballs_json};
+const CHART_H = 300;
+const snowballPositions = new Set(SNOWBALLS.map(s => s.pos));
+
+// Y-axis
+const yAxis = document.getElementById('yAxis');
+for (let i = 100; i >= 0; i -= 10) {{
+  const s = document.createElement('span');
+  s.textContent = i + '%';
+  yAxis.appendChild(s);
+}}
+
+const colsEl = document.getElementById('columns');
+const indexRow = document.getElementById('indexRow');
+const tokenRow = document.getElementById('tokenRow');
+const marginRow = document.getElementById('marginRow');
+
+// Add left padding to label rows to match y-axis
+[indexRow, tokenRow, marginRow].forEach(row => {{
+  row.style.marginLeft = '36px';
+}});
+
+TOKENS.forEach((t, i) => {{
+  // Column
+  const col = document.createElement('div');
+  col.className = 'token-col';
+  const barArea = document.createElement('div');
+  barArea.className = 'bar-area';
+
+  // Chosen bar: fills from top down
+  const chosenBar = document.createElement('div');
+  chosenBar.className = 'chosen-bar';
+  chosenBar.style.height = (t.chosen_prob / 100 * CHART_H) + 'px';
+  barArea.appendChild(chosenBar);
+
+  // Runner bar: fills from bottom up
+  const runnerBar = document.createElement('div');
+  runnerBar.className = 'runner-bar';
+  runnerBar.style.height = (t.runner_up_prob / 100 * CHART_H) + 'px';
+  barArea.appendChild(runnerBar);
+
+  // Snowball marker
+  if (snowballPositions.has(i)) {{
+    const marker = document.createElement('div');
+    marker.className = 'snowball-marker';
+    barArea.appendChild(marker);
+  }}
+
+  col.appendChild(barArea);
+  colsEl.appendChild(col);
+
+  // Tooltip events
+  col.addEventListener('mouseenter', (e) => {{
+    const tt = document.getElementById('tooltip');
+    const marginStr = t.margin !== null ? t.margin.toFixed(1) + '%' : 'n/a';
+    const snowStr = snowballPositions.has(i) ? '<div style="color:#f85149;margin-top:4px;">Snowball pivot</div>' : '';
+    tt.innerHTML = '<div class="tt-token">' + escapeHtml(t.token) + '</div>'
+      + '<div class="tt-row"><span class="tt-label">Chosen:</span><span class="tt-value" style="color:#3fb950">' + t.chosen_prob + '%</span></div>'
+      + '<div class="tt-row"><span class="tt-label">Runner (' + escapeHtml(t.runner_token) + '):</span><span class="tt-value" style="color:#f0883e">' + t.runner_up_prob + '%</span></div>'
+      + '<div class="tt-row"><span class="tt-label">Margin:</span><span class="tt-value">' + marginStr + '</span></div>'
+      + snowStr;
+    tt.style.display = 'block';
+  }});
+  col.addEventListener('mousemove', (e) => {{
+    const tt = document.getElementById('tooltip');
+    tt.style.left = (e.clientX + 12) + 'px';
+    tt.style.top = (e.clientY - 10) + 'px';
+  }});
+  col.addEventListener('mouseleave', () => {{
+    document.getElementById('tooltip').style.display = 'none';
+  }});
+
+  // Index label
+  const idxCell = document.createElement('div');
+  idxCell.className = 'cell';
+  idxCell.textContent = i;
+  indexRow.appendChild(idxCell);
+
+  // Token label
+  const tokCell = document.createElement('div');
+  tokCell.className = 'cell';
+  tokCell.title = t.token;
+  const display = t.token.trim() || '\u00b7';
+  tokCell.textContent = display.length > 4 ? display.slice(0, 4) : display;
+  tokenRow.appendChild(tokCell);
+
+  // Margin label
+  const mCell = document.createElement('div');
+  mCell.className = 'cell';
+  if (t.margin !== null) {{
+    if (t.margin < 5) {{
+      mCell.textContent = t.margin.toFixed(0) + '%';
+      mCell.classList.add('coin-flip');
+    }} else {{
+      mCell.textContent = t.margin.toFixed(0) + '%';
+    }}
+  }} else {{
+    mCell.textContent = '-';
+  }}
+  marginRow.appendChild(mCell);
+}});
+
+// Snowball section
+if (SNOWBALLS.length > 0) {{
+  const sec = document.getElementById('snowballSection');
+  let html = '<h2>Snowball Effect Analysis</h2><div class="chart-wrapper"><table><tr><th>Pos</th><th>Pivot</th><th>Chosen%</th><th>Margin</th><th>PostAvg</th><th>Lift</th><th>Context</th></tr>';
+  SNOWBALLS.sort((a, b) => b.lift - a.lift).forEach(s => {{
+    const marginStr = s.margin !== null ? s.margin.toFixed(1) + '%' : 'n/a';
+    html += '<tr><td>' + s.pos + '</td><td style="font-family:monospace;color:#58a6ff">' + escapeHtml(s.token) + '</td><td>' + s.prob.toFixed(1) + '%</td><td>' + marginStr + '</td><td>' + s.post_avg.toFixed(1) + '%</td><td style="color:#f85149">+' + s.lift.toFixed(1) + '%</td><td style="font-family:monospace;font-size:11px">' + escapeHtml(s.context) + '</td></tr>';
+  }});
+  html += '</table></div>';
+  sec.innerHTML = html;
+}}
+
+function escapeHtml(s) {{
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}}
+</script>
+</body>
+</html>"""
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+
 # Let's test it with a prompt that requires specific retrieval
 test_prompt = "What was the exact date and location of the signing of the Treaty of Waitangi?"
 generate_confidence_scorecard(test_prompt)
