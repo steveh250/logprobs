@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Logprobs Confidence Report</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+  h1 { color: #58a6ff; margin-bottom: 4px; font-size: 1.4em; }
+  h2 { color: #58a6ff; margin: 24px 0 12px; font-size: 1.15em; border-bottom: 1px solid #21262d; padding-bottom: 6px; }
+  .prompt { color: #8b949e; font-style: italic; margin-bottom: 16px; font-size: 0.9em; }
+  .generated { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 16px; font-size: 0.9em; white-space: pre-wrap; }
+  .scorecard { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .metric { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
+  .metric .label { color: #8b949e; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.5px; }
+  .metric .value { font-size: 1.5em; font-weight: 700; margin-top: 4px; }
+  .metric .detail { color: #8b949e; font-size: 0.78em; margin-top: 4px; }
+  .pass { color: #3fb950; }
+  .warn { color: #d29922; }
+  .fail { color: #f85149; }
+
+  /* Chart container */
+  .chart-wrapper { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+  .chart-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 8px; }
+  .chart-scroll::-webkit-scrollbar { height: 8px; }
+  .chart-scroll::-webkit-scrollbar-track { background: #21262d; border-radius: 4px; }
+  .chart-scroll::-webkit-scrollbar-thumb { background: #484f58; border-radius: 4px; }
+  .chart-scroll::-webkit-scrollbar-thumb:hover { background: #6e7681; }
+
+  .chart-area { display: flex; align-items: flex-end; position: relative; }
+  .y-axis { display: flex; flex-direction: column; justify-content: space-between; height: 300px; margin-right: 4px; flex-shrink: 0; }
+  .y-axis span { font-size: 10px; color: #484f58; text-align: right; min-width: 32px; }
+  .columns-container { display: flex; align-items: stretch; height: 300px; position: relative; }
+
+  .token-col { display: flex; flex-direction: column; align-items: center; width: 38px; min-width: 38px; flex-shrink: 0; position: relative; height: 100%; cursor: pointer; }
+  .token-col:hover { background: rgba(88,166,255,0.06); }
+  .token-col .bar-area { width: 100%; height: 100%; position: relative; }
+  .token-col .chosen-bar { position: absolute; top: 0; left: 4px; right: 4px; background: #3fb950; border-radius: 2px 2px 0 0; }
+  .token-col .runner-bar { position: absolute; bottom: 0; left: 4px; right: 4px; background: #f0883e; border-radius: 0 0 2px 2px; }
+  .token-col .snowball-marker { position: absolute; top: -2px; left: 50%; transform: translateX(-50%); width: 8px; height: 8px; background: #f85149; border-radius: 50%; z-index: 2; }
+
+  .labels-row { display: flex; }
+  .labels-row .cell { width: 38px; min-width: 38px; flex-shrink: 0; text-align: center; font-size: 9px; padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .labels-row.index-row .cell { color: #484f58; }
+  .labels-row.token-row .cell { color: #c9d1d9; font-family: monospace; }
+  .labels-row.margin-row .cell { color: #8b949e; }
+  .labels-row.margin-row .cell.coin-flip { color: #f85149; font-weight: 700; }
+
+  /* Tooltip */
+  .tooltip { display: none; position: fixed; background: #1c2128; border: 1px solid #444c56; border-radius: 6px; padding: 10px 14px; font-size: 12px; z-index: 1000; pointer-events: none; box-shadow: 0 4px 12px rgba(0,0,0,0.4); max-width: 280px; }
+  .tooltip .tt-token { font-family: monospace; font-size: 14px; color: #58a6ff; margin-bottom: 4px; }
+  .tooltip .tt-row { display: flex; justify-content: space-between; gap: 16px; margin-top: 2px; }
+  .tooltip .tt-label { color: #8b949e; }
+  .tooltip .tt-value { font-weight: 600; }
+
+  /* Legend */
+  .legend { display: flex; gap: 20px; margin: 8px 0 4px; font-size: 0.8em; color: #8b949e; }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .legend .swatch { width: 14px; height: 14px; border-radius: 2px; display: inline-block; }
+  .swatch.chosen { background: #3fb950; }
+  .swatch.runner { background: #f0883e; }
+  .swatch.snowball { background: #f85149; border-radius: 50%; width: 10px; height: 10px; }
+
+  /* Snowball table */
+  table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  th { text-align: left; color: #8b949e; font-weight: 600; padding: 6px 10px; border-bottom: 1px solid #30363d; }
+  td { padding: 6px 10px; border-bottom: 1px solid #21262d; }
+  tr:hover td { background: #161b22; }
+</style>
+</head>
+<body>
+
+<h1>Logprobs Confidence Report</h1>
+<div class="prompt">Prompt: What was the exact date and location of the signing of the Treaty of Waitangi?</div>
+<div class="generated">The Treaty of Waitangi was signed on February 6, 1840, at Waitangi, near Bay of Islands in the North Island of New Zealand. The treaty was signed by representatives of the British Crown and around 540 Māori chiefs from various iwi (tribes) in New Zealand.
+
+There were actually several signings of the Treaty of Waitangi on different dates between February 5 and March 16, 1840, at various locations in the Bay of Islands. However, the most significant signing took place on February 6, 1840, at Waitangi, where around 40 Māori chiefs signed the treaty.
+
+The main signatories to the Treaty of Waitangi were:
+
+* William Hobson, the British Consul and representative of the British Crown
+* Hone Heke, a prominent Māori chief from the Ngapuhi iwi
+* Tamati Waka Nene, another prominent Māori chief from the Ngapuhi iwi
+
+The Treaty of Waitangi is considered one of the most significant documents in New Zealand&#x27;s history and has had a profound impact on the country&#x27;s development.</div>
+
+<div class="scorecard">
+  <div class="metric">
+    <div class="label">Sequence Score (Raw &rarr; Adjusted)</div>
+    <div class="value">72.5% &rarr; 46.4%</div>
+    <div class="detail">Delta: -26.1%</div>
+  </div>
+  <div class="metric">
+    <div class="label">Weakest Link</div>
+    <div class="value fail">5.4%</div>
+    <div class="detail">Token: &#x27; between&#x27;</div>
+  </div>
+  <div class="metric">
+    <div class="label">Risk Density</div>
+    <div class="value fail">32.2%</div>
+    <div class="detail">Tokens below 80% threshold</div>
+  </div>
+  <div class="metric">
+    <div class="label">Narrowest Margin</div>
+    <div class="value fail">1.1%</div>
+    <div class="detail">&#x27; sign&#x27; vs &#x27; sign&#x27;</div>
+  </div>
+</div>
+
+<h2>Token Gap Chart</h2>
+<div class="chart-wrapper">
+  <div class="legend">
+    <span><span class="swatch chosen"></span> Chosen token probability</span>
+    <span><span class="swatch runner"></span> Runner-up probability</span>
+    <span><span class="swatch snowball"></span> Snowball pivot</span>
+    <span style="color:#484f58;">Gap = white space between bars</span>
+  </div>
+  <div class="chart-scroll" id="chartScroll">
+    <div class="chart-area">
+      <div class="y-axis" id="yAxis"></div>
+      <div class="columns-container" id="columns"></div>
+    </div>
+    <div class="labels-row index-row" id="indexRow"></div>
+    <div class="labels-row token-row" id="tokenRow"></div>
+    <div class="labels-row margin-row" id="marginRow"></div>
+  </div>
+</div>
+
+<div id="snowballSection"></div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const TOKENS = [{"index": 0, "token": "The", "chosen_prob": 71.77, "runner_up_prob": 27.96, "runner_token": "A", "margin": 43.81}, {"index": 1, "token": " Treaty", "chosen_prob": 88.43, "runner_up_prob": 7.29, "runner_token": " exact", "margin": 81.13}, {"index": 2, "token": " of", "chosen_prob": 99.99, "runner_up_prob": 0.01, "runner_token": " was", "margin": 99.98}, {"index": 3, "token": " Wait", "chosen_prob": 99.99, "runner_up_prob": 0.01, "runner_token": " Wa", "margin": 99.99}, {"index": 4, "token": "angi", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "anga", "margin": 100.0}, {"index": 5, "token": " was", "chosen_prob": 98.81, "runner_up_prob": 0.6, "runner_token": ",", "margin": 98.21}, {"index": 6, "token": " signed", "chosen_prob": 99.46, "runner_up_prob": 0.36, "runner_token": " actually", "margin": 99.1}, {"index": 7, "token": " on", "chosen_prob": 97.8, "runner_up_prob": 1.79, "runner_token": " in", "margin": 96.0}, {"index": 8, "token": " February", "chosen_prob": 82.68, "runner_up_prob": 14.32, "runner_token": " the", "margin": 68.36}, {"index": 9, "token": " ", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": ",", "margin": 100.0}, {"index": 10, "token": "6", "chosen_prob": 99.96, "runner_up_prob": 0.04, "runner_token": "5", "margin": 99.92}, {"index": 11, "token": ",", "chosen_prob": 99.83, "runner_up_prob": 0.15, "runner_token": "th", "margin": 99.68}, {"index": 12, "token": " ", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " but", "margin": 100.0}, {"index": 13, "token": "184", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "164", "margin": 100.0}, {"index": 14, "token": "0", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "1", "margin": 100.0}, {"index": 15, "token": ",", "chosen_prob": 93.58, "runner_up_prob": 6.15, "runner_token": ".", "margin": 87.43}, {"index": 16, "token": " at", "chosen_prob": 69.94, "runner_up_prob": 27.45, "runner_token": " in", "margin": 42.49}, {"index": 17, "token": " Wait", "chosen_prob": 89.13, "runner_up_prob": 3.09, "runner_token": " the", "margin": 86.04}, {"index": 18, "token": "angi", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "ang", "margin": 100.0}, {"index": 19, "token": ",", "chosen_prob": 94.89, "runner_up_prob": 3.67, "runner_token": " in", "margin": 91.22}, {"index": 20, "token": " near", "chosen_prob": 27.46, "runner_up_prob": 23.94, "runner_token": " a", "margin": 3.53}, {"index": 21, "token": " Bay", "chosen_prob": 22.18, "runner_up_prob": 22.18, "runner_token": " Bay", "margin": 24.0}, {"index": 22, "token": " of", "chosen_prob": 99.95, "runner_up_prob": 0.04, "runner_token": "lys", "margin": 99.91}, {"index": 23, "token": " Islands", "chosen_prob": 99.32, "runner_up_prob": 0.63, "runner_token": " Island", "margin": 98.69}, {"index": 24, "token": " in", "chosen_prob": 14.16, "runner_up_prob": 14.16, "runner_token": " in", "margin": 71.0}, {"index": 25, "token": " the", "chosen_prob": 94.44, "runner_up_prob": 3.27, "runner_token": " New", "margin": 91.17}, {"index": 26, "token": " North", "chosen_prob": 47.66, "runner_up_prob": 36.35, "runner_token": " northern", "margin": 11.31}, {"index": 27, "token": " Island", "chosen_prob": 92.33, "runner_up_prob": 7.56, "runner_token": "land", "margin": 84.77}, {"index": 28, "token": " of", "chosen_prob": 98.73, "runner_up_prob": 1.25, "runner_token": ",", "margin": 97.48}, {"index": 29, "token": " New", "chosen_prob": 99.61, "runner_up_prob": 0.19, "runner_token": " what", "margin": 99.42}, {"index": 30, "token": " Zealand", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " Ze", "margin": 100.0}, {"index": 31, "token": ".", "chosen_prob": 76.19, "runner_up_prob": 22.14, "runner_token": ".\n\n", "margin": 54.05}, {"index": 32, "token": " The", "chosen_prob": 17.59, "runner_up_prob": 17.59, "runner_token": " The", "margin": 27.54}, {"index": 33, "token": " treaty", "chosen_prob": 28.26, "runner_up_prob": 28.26, "runner_token": " treaty", "margin": 10.51}, {"index": 34, "token": " was", "chosen_prob": 98.49, "runner_up_prob": 0.85, "runner_token": " signing", "margin": 97.64}, {"index": 35, "token": " signed", "chosen_prob": 92.17, "runner_up_prob": 3.08, "runner_token": " initially", "margin": 89.1}, {"index": 36, "token": " by", "chosen_prob": 80.24, "runner_up_prob": 15.37, "runner_token": " between", "margin": 64.87}, {"index": 37, "token": " representatives", "chosen_prob": 64.23, "runner_up_prob": 7.5, "runner_token": " M", "margin": 56.73}, {"index": 38, "token": " of", "chosen_prob": 99.63, "runner_up_prob": 0.36, "runner_token": " from", "margin": 99.27}, {"index": 39, "token": " the", "chosen_prob": 99.69, "runner_up_prob": 0.11, "runner_token": " around", "margin": 99.58}, {"index": 40, "token": " British", "chosen_prob": 99.33, "runner_up_prob": 0.29, "runner_token": " M", "margin": 99.04}, {"index": 41, "token": " Crown", "chosen_prob": 99.33, "runner_up_prob": 0.56, "runner_token": " government", "margin": 98.77}, {"index": 42, "token": " and", "chosen_prob": 87.62, "runner_up_prob": 11.25, "runner_token": ",", "margin": 76.37}, {"index": 43, "token": " around", "chosen_prob": 30.04, "runner_up_prob": 16.74, "runner_token": " a", "margin": 13.3}, {"index": 44, "token": " ", "chosen_prob": 99.89, "runner_up_prob": 0.1, "runner_token": " fifty", "margin": 99.79}, {"index": 45, "token": "540", "chosen_prob": 36.01, "runner_up_prob": 23.52, "runner_token": "50", "margin": 12.49}, {"index": 46, "token": " M", "chosen_prob": 82.69, "runner_up_prob": 14.79, "runner_token": " Ma", "margin": 67.9}, {"index": 47, "token": "\u0101", "chosen_prob": 99.98, "runner_up_prob": 0.01, "runner_token": "\u00e4", "margin": 99.98}, {"index": 48, "token": "ori", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " ori", "margin": 100.0}, {"index": 49, "token": " chiefs", "chosen_prob": 95.49, "runner_up_prob": 3.96, "runner_token": " Chiefs", "margin": 91.53}, {"index": 50, "token": " from", "chosen_prob": 19.95, "runner_up_prob": 23.23, "runner_token": ".", "margin": 8.17}, {"index": 51, "token": " various", "chosen_prob": 41.1, "runner_up_prob": 41.1, "runner_token": " various", "margin": 2.39}, {"index": 52, "token": " i", "chosen_prob": 87.16, "runner_up_prob": 11.95, "runner_token": " tribes", "margin": 75.21}, {"index": 53, "token": "wi", "chosen_prob": 99.98, "runner_up_prob": 0.02, "runner_token": "wis", "margin": 99.97}, {"index": 54, "token": " (", "chosen_prob": 99.66, "runner_up_prob": 0.14, "runner_token": " and", "margin": 99.52}, {"index": 55, "token": "trib", "chosen_prob": 93.32, "runner_up_prob": 2.89, "runner_token": "M", "margin": 90.43}, {"index": 56, "token": "es", "chosen_prob": 99.22, "runner_up_prob": 0.6, "runner_token": "al", "margin": 98.62}, {"index": 57, "token": ")", "chosen_prob": 58.97, "runner_up_prob": 28.48, "runner_token": ").", "margin": 30.48}, {"index": 58, "token": " in", "chosen_prob": 43.66, "runner_up_prob": 18.94, "runner_token": " and", "margin": 24.72}, {"index": 59, "token": " New", "chosen_prob": 51.16, "runner_up_prob": 40.73, "runner_token": " the", "margin": 10.43}, {"index": 60, "token": " Zealand", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " Z", "margin": 100.0}, {"index": 61, "token": ".\n\n", "chosen_prob": 61.65, "runner_up_prob": 34.82, "runner_token": ".", "margin": 26.83}, {"index": 62, "token": "There", "chosen_prob": 26.67, "runner_up_prob": 26.67, "runner_token": "There", "margin": 11.07}, {"index": 63, "token": " were", "chosen_prob": 96.03, "runner_up_prob": 1.92, "runner_token": " are", "margin": 94.11}, {"index": 64, "token": " actually", "chosen_prob": 80.24, "runner_up_prob": 11.61, "runner_token": " two", "margin": 68.63}, {"index": 65, "token": " several", "chosen_prob": 62.18, "runner_up_prob": 28.17, "runner_token": " two", "margin": 34.01}, {"index": 66, "token": " signings", "chosen_prob": 78.62, "runner_up_prob": 9.8, "runner_token": " signing", "margin": 68.83}, {"index": 67, "token": " of", "chosen_prob": 96.43, "runner_up_prob": 2.14, "runner_token": " that", "margin": 94.29}, {"index": 68, "token": " the", "chosen_prob": 99.8, "runner_up_prob": 0.06, "runner_token": " copies", "margin": 99.74}, {"index": 69, "token": " Treaty", "chosen_prob": 44.08, "runner_up_prob": 44.08, "runner_token": " Treaty", "margin": 11.53}, {"index": 70, "token": " of", "chosen_prob": 92.53, "runner_up_prob": 2.84, "runner_token": " over", "margin": 89.69}, {"index": 71, "token": " Wait", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " Wa", "margin": 99.99}, {"index": 72, "token": "angi", "chosen_prob": 99.98, "runner_up_prob": 0.0, "runner_token": "agi", "margin": 99.98}, {"index": 73, "token": " on", "chosen_prob": 20.1, "runner_up_prob": 20.1, "runner_token": " on", "margin": 19.42}, {"index": 74, "token": " different", "chosen_prob": 78.99, "runner_up_prob": 8.58, "runner_token": " February", "margin": 70.41}, {"index": 75, "token": " dates", "chosen_prob": 73.28, "runner_up_prob": 26.41, "runner_token": " days", "margin": 46.87}, {"index": 76, "token": " between", "chosen_prob": 5.45, "runner_up_prob": 18.57, "runner_token": " and", "margin": 28.55}, {"index": 77, "token": " February", "chosen_prob": 91.96, "runner_up_prob": 4.42, "runner_token": " January", "margin": 87.54}, {"index": 78, "token": " ", "chosen_prob": 90.92, "runner_up_prob": 9.06, "runner_token": " and", "margin": 81.86}, {"index": 79, "token": "5", "chosen_prob": 68.88, "runner_up_prob": 16.5, "runner_token": "4", "margin": 52.38}, {"index": 80, "token": " and", "chosen_prob": 96.67, "runner_up_prob": 1.67, "runner_token": "-", "margin": 95.0}, {"index": 81, "token": " March", "chosen_prob": 83.97, "runner_up_prob": 10.36, "runner_token": " February", "margin": 73.61}, {"index": 82, "token": " ", "chosen_prob": 99.99, "runner_up_prob": 0.0, "runner_token": ",", "margin": 99.99}, {"index": 83, "token": "16", "chosen_prob": 53.16, "runner_up_prob": 15.03, "runner_token": "18", "margin": 38.13}, {"index": 84, "token": ",", "chosen_prob": 99.93, "runner_up_prob": 0.04, "runner_token": " of", "margin": 99.88}, {"index": 85, "token": " ", "chosen_prob": 99.99, "runner_up_prob": 0.01, "runner_token": " but", "margin": 99.98}, {"index": 86, "token": "184", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "186", "margin": 99.99}, {"index": 87, "token": "0", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "6", "margin": 100.0}, {"index": 88, "token": ",", "chosen_prob": 52.84, "runner_up_prob": 47.08, "runner_token": ".", "margin": 5.76}, {"index": 89, "token": " at", "chosen_prob": 44.62, "runner_up_prob": 30.05, "runner_token": " as", "margin": 14.57}, {"index": 90, "token": " various", "chosen_prob": 73.5, "runner_up_prob": 16.53, "runner_token": " different", "margin": 56.97}, {"index": 91, "token": " locations", "chosen_prob": 99.68, "runner_up_prob": 0.21, "runner_token": " places", "margin": 99.47}, {"index": 92, "token": " in", "chosen_prob": 56.17, "runner_up_prob": 27.16, "runner_token": " around", "margin": 29.01}, {"index": 93, "token": " the", "chosen_prob": 85.49, "runner_up_prob": 12.7, "runner_token": " New", "margin": 72.79}, {"index": 94, "token": " Bay", "chosen_prob": 62.96, "runner_up_prob": 35.96, "runner_token": " North", "margin": 27.0}, {"index": 95, "token": " of", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " and", "margin": 100.0}, {"index": 96, "token": " Islands", "chosen_prob": 99.98, "runner_up_prob": 0.02, "runner_token": " Island", "margin": 99.96}, {"index": 97, "token": ".", "chosen_prob": 35.69, "runner_up_prob": 27.69, "runner_token": ",", "margin": 8.0}, {"index": 98, "token": " However", "chosen_prob": 54.83, "runner_up_prob": 36.14, "runner_token": " The", "margin": 18.69}, {"index": 99, "token": ",", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": ":\n\n", "margin": 100.0}, {"index": 100, "token": " the", "chosen_prob": 91.52, "runner_up_prob": 7.89, "runner_token": " February", "margin": 83.63}, {"index": 101, "token": " most", "chosen_prob": 60.58, "runner_up_prob": 17.56, "runner_token": " main", "margin": 43.02}, {"index": 102, "token": " significant", "chosen_prob": 70.12, "runner_up_prob": 9.01, "runner_token": " famous", "margin": 61.11}, {"index": 103, "token": " signing", "chosen_prob": 33.89, "runner_up_prob": 33.89, "runner_token": " signing", "margin": 13.55}, {"index": 104, "token": " took", "chosen_prob": 55.62, "runner_up_prob": 27.28, "runner_token": " was", "margin": 28.35}, {"index": 105, "token": " place", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " places", "margin": 100.0}, {"index": 106, "token": " on", "chosen_prob": 90.93, "runner_up_prob": 9.05, "runner_token": " at", "margin": 81.87}, {"index": 107, "token": " February", "chosen_prob": 98.82, "runner_up_prob": 0.78, "runner_token": " the", "margin": 98.04}, {"index": 108, "token": " ", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": ",", "margin": 100.0}, {"index": 109, "token": "6", "chosen_prob": 99.96, "runner_up_prob": 0.03, "runner_token": "5", "margin": 99.93}, {"index": 110, "token": ",", "chosen_prob": 90.69, "runner_up_prob": 9.15, "runner_token": " at", "margin": 81.54}, {"index": 111, "token": " ", "chosen_prob": 99.65, "runner_up_prob": 0.26, "runner_token": " at", "margin": 99.4}, {"index": 112, "token": "184", "chosen_prob": 99.91, "runner_up_prob": 0.03, "runner_token": "183", "margin": 99.88}, {"index": 113, "token": "0", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "1", "margin": 99.99}, {"index": 114, "token": ",", "chosen_prob": 99.96, "runner_up_prob": 0.03, "runner_token": ".\n\n", "margin": 99.92}, {"index": 115, "token": " at", "chosen_prob": 97.39, "runner_up_prob": 1.32, "runner_token": " on", "margin": 96.07}, {"index": 116, "token": " Wait", "chosen_prob": 78.0, "runner_up_prob": 15.4, "runner_token": " the", "margin": 62.6}, {"index": 117, "token": "angi", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "ang", "margin": 100.0}, {"index": 118, "token": ",", "chosen_prob": 75.58, "runner_up_prob": 17.53, "runner_token": ".\n\n", "margin": 58.05}, {"index": 119, "token": " where", "chosen_prob": 45.53, "runner_up_prob": 38.3, "runner_token": " which", "margin": 7.23}, {"index": 120, "token": " around", "chosen_prob": 37.31, "runner_up_prob": 21.49, "runner_token": " the", "margin": 15.82}, {"index": 121, "token": " ", "chosen_prob": 99.93, "runner_up_prob": 0.05, "runner_token": " half", "margin": 99.88}, {"index": 122, "token": "40", "chosen_prob": 27.38, "runner_up_prob": 12.03, "runner_token": "50", "margin": 15.34}, {"index": 123, "token": " M", "chosen_prob": 76.31, "runner_up_prob": 14.25, "runner_token": "-", "margin": 62.06}, {"index": 124, "token": "\u0101", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "\u00e0", "margin": 100.0}, {"index": 125, "token": "ori", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "ni", "margin": 100.0}, {"index": 126, "token": " chiefs", "chosen_prob": 99.36, "runner_up_prob": 0.2, "runner_token": " leaders", "margin": 99.15}, {"index": 127, "token": " signed", "chosen_prob": 37.44, "runner_up_prob": 16.85, "runner_token": " and", "margin": 20.6}, {"index": 128, "token": " the", "chosen_prob": 98.94, "runner_up_prob": 0.35, "runner_token": " on", "margin": 98.59}, {"index": 129, "token": " treaty", "chosen_prob": 87.52, "runner_up_prob": 11.62, "runner_token": " document", "margin": 75.9}, {"index": 130, "token": ".\n\n", "chosen_prob": 60.62, "runner_up_prob": 11.94, "runner_token": " in", "margin": 48.69}, {"index": 131, "token": "The", "chosen_prob": 42.8, "runner_up_prob": 24.07, "runner_token": "It", "margin": 18.72}, {"index": 132, "token": " main", "chosen_prob": 8.81, "runner_up_prob": 8.81, "runner_token": " main", "margin": 22.93}, {"index": 133, "token": " sign", "chosen_prob": 34.58, "runner_up_prob": 34.58, "runner_token": " sign", "margin": 1.06}, {"index": 134, "token": "atories", "chosen_prob": 71.9, "runner_up_prob": 20.74, "runner_token": "atory", "margin": 51.16}, {"index": 135, "token": " to", "chosen_prob": 30.25, "runner_up_prob": 20.56, "runner_token": " at", "margin": 9.7}, {"index": 136, "token": " the", "chosen_prob": 99.99, "runner_up_prob": 0.0, "runner_token": " this", "margin": 99.99}, {"index": 137, "token": " Treaty", "chosen_prob": 31.85, "runner_up_prob": 31.85, "runner_token": " Treaty", "margin": 35.57}, {"index": 138, "token": " of", "chosen_prob": 92.91, "runner_up_prob": 3.91, "runner_token": " at", "margin": 89.0}, {"index": 139, "token": " Wait", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " ", "margin": 99.99}, {"index": 140, "token": "angi", "chosen_prob": 99.99, "runner_up_prob": 0.0, "runner_token": "agi", "margin": 99.99}, {"index": 141, "token": " were", "chosen_prob": 54.33, "runner_up_prob": 15.79, "runner_token": " at", "margin": 38.54}, {"index": 142, "token": ":\n\n", "chosen_prob": 95.91, "runner_up_prob": 0.63, "runner_token": " British", "margin": 95.27}, {"index": 143, "token": "*", "chosen_prob": 98.82, "runner_up_prob": 1.13, "runner_token": "1", "margin": 97.69}, {"index": 144, "token": " William", "chosen_prob": 24.86, "runner_up_prob": 10.43, "runner_token": " Governor", "margin": 14.43}, {"index": 145, "token": " Hob", "chosen_prob": 99.96, "runner_up_prob": 0.01, "runner_token": " H", "margin": 99.95}, {"index": 146, "token": "son", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "SON", "margin": 100.0}, {"index": 147, "token": ",", "chosen_prob": 96.07, "runner_up_prob": 3.86, "runner_token": " (", "margin": 92.21}, {"index": 148, "token": " the", "chosen_prob": 90.57, "runner_up_prob": 3.85, "runner_token": " British", "margin": 86.72}, {"index": 149, "token": " British", "chosen_prob": 94.89, "runner_up_prob": 1.45, "runner_token": " Lieutenant", "margin": 93.44}, {"index": 150, "token": " Cons", "chosen_prob": 71.89, "runner_up_prob": 13.13, "runner_token": " Commissioner", "margin": 58.76}, {"index": 151, "token": "ul", "chosen_prob": 99.98, "runner_up_prob": 0.01, "runner_token": "ular", "margin": 99.97}, {"index": 152, "token": " and", "chosen_prob": 8.88, "runner_up_prob": 26.46, "runner_token": ",", "margin": 19.04}, {"index": 153, "token": " representative", "chosen_prob": 17.36, "runner_up_prob": 16.12, "runner_token": " Commissioner", "margin": 1.24}, {"index": 154, "token": " of", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " for", "margin": 100.0}, {"index": 155, "token": " the", "chosen_prob": 98.8, "runner_up_prob": 0.87, "runner_token": " Queen", "margin": 97.94}, {"index": 156, "token": " British", "chosen_prob": 99.18, "runner_up_prob": 0.65, "runner_token": " Crown", "margin": 98.53}, {"index": 157, "token": " Crown", "chosen_prob": 99.49, "runner_up_prob": 0.35, "runner_token": " government", "margin": 99.13}, {"index": 158, "token": "\n", "chosen_prob": 97.03, "runner_up_prob": 2.33, "runner_token": ",", "margin": 94.7}, {"index": 159, "token": "*", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "\t", "margin": 100.0}, {"index": 160, "token": " H", "chosen_prob": 78.61, "runner_up_prob": 3.7, "runner_token": " He", "margin": 74.9}, {"index": 161, "token": "one", "chosen_prob": 80.72, "runner_up_prob": 15.64, "runner_token": "\u014d", "margin": 65.08}, {"index": 162, "token": " He", "chosen_prob": 99.93, "runner_up_prob": 0.03, "runner_token": " H", "margin": 99.9}, {"index": 163, "token": "ke", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "KE", "margin": 100.0}, {"index": 164, "token": ",", "chosen_prob": 96.97, "runner_up_prob": 2.3, "runner_token": " and", "margin": 94.67}, {"index": 165, "token": " a", "chosen_prob": 97.32, "runner_up_prob": 0.57, "runner_token": " Te", "margin": 96.76}, {"index": 166, "token": " prominent", "chosen_prob": 21.0, "runner_up_prob": 21.0, "runner_token": " prominent", "margin": 38.48}, {"index": 167, "token": " M", "chosen_prob": 92.28, "runner_up_prob": 7.07, "runner_token": " Ng", "margin": 85.21}, {"index": 168, "token": "\u0101", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " \ufffd", "margin": 100.0}, {"index": 169, "token": "ori", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " ori", "margin": 100.0}, {"index": 170, "token": " chief", "chosen_prob": 96.3, "runner_up_prob": 3.36, "runner_token": " leader", "margin": 92.93}, {"index": 171, "token": " from", "chosen_prob": 87.1, "runner_up_prob": 7.21, "runner_token": "\n", "margin": 79.9}, {"index": 172, "token": " the", "chosen_prob": 94.71, "runner_up_prob": 4.5, "runner_token": " Ng", "margin": 90.21}, {"index": 173, "token": " Ng", "chosen_prob": 75.68, "runner_up_prob": 10.28, "runner_token": " Bay", "margin": 65.4}, {"index": 174, "token": "ap", "chosen_prob": 15.43, "runner_up_prob": 15.43, "runner_token": "ap", "margin": 69.02}, {"index": 175, "token": "u", "chosen_prob": 99.93, "runner_up_prob": 0.03, "runner_token": "\u016b", "margin": 99.9}, {"index": 176, "token": "hi", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "HI", "margin": 100.0}, {"index": 177, "token": " i", "chosen_prob": 94.78, "runner_up_prob": 5.18, "runner_token": " tribe", "margin": 89.6}, {"index": 178, "token": "wi", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "wa", "margin": 100.0}, {"index": 179, "token": "\n", "chosen_prob": 97.67, "runner_up_prob": 1.25, "runner_token": " (", "margin": 96.43}, {"index": 180, "token": "*", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "Other", "margin": 100.0}, {"index": 181, "token": " Tam", "chosen_prob": 24.44, "runner_up_prob": 20.52, "runner_token": " Hong", "margin": 3.92}, {"index": 182, "token": "ati", "chosen_prob": 99.27, "runner_up_prob": 0.44, "runner_token": "aki", "margin": 98.83}, {"index": 183, "token": " W", "chosen_prob": 95.04, "runner_up_prob": 4.53, "runner_token": " Wa", "margin": 90.51}, {"index": 184, "token": "aka", "chosen_prob": 99.63, "runner_up_prob": 0.05, "runner_token": "ahan", "margin": 99.58}, {"index": 185, "token": " N", "chosen_prob": 99.65, "runner_up_prob": 0.31, "runner_token": ",", "margin": 99.34}, {"index": 186, "token": "ene", "chosen_prob": 93.36, "runner_up_prob": 4.64, "runner_token": "uku", "margin": 88.72}, {"index": 187, "token": ",", "chosen_prob": 99.92, "runner_up_prob": 0.03, "runner_token": " (", "margin": 99.89}, {"index": 188, "token": " another", "chosen_prob": 22.45, "runner_up_prob": 22.45, "runner_token": " another", "margin": 54.89}, {"index": 189, "token": " prominent", "chosen_prob": 75.78, "runner_up_prob": 11.16, "runner_token": " M", "margin": 64.62}, {"index": 190, "token": " M", "chosen_prob": 98.76, "runner_up_prob": 1.03, "runner_token": " Ng", "margin": 97.73}, {"index": 191, "token": "\u0101", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "\u0103", "margin": 100.0}, {"index": 192, "token": "ori", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "\u043e\u0440\u0438", "margin": 100.0}, {"index": 193, "token": " chief", "chosen_prob": 99.96, "runner_up_prob": 0.04, "runner_token": " leader", "margin": 99.91}, {"index": 194, "token": " from", "chosen_prob": 97.17, "runner_up_prob": 2.07, "runner_token": "\n", "margin": 95.1}, {"index": 195, "token": " the", "chosen_prob": 99.91, "runner_up_prob": 0.07, "runner_token": " Ng", "margin": 99.83}, {"index": 196, "token": " Ng", "chosen_prob": 90.17, "runner_up_prob": 6.88, "runner_token": " Te", "margin": 83.28}, {"index": 197, "token": "ap", "chosen_prob": 99.17, "runner_up_prob": 0.48, "runner_token": "\u0101", "margin": 98.69}, {"index": 198, "token": "u", "chosen_prob": 99.9, "runner_up_prob": 0.05, "runner_token": "iti", "margin": 99.85}, {"index": 199, "token": "hi", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "hip", "margin": 100.0}, {"index": 200, "token": " i", "chosen_prob": 99.91, "runner_up_prob": 0.08, "runner_token": " and", "margin": 99.83}, {"index": 201, "token": "wi", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "wa", "margin": 100.0}, {"index": 202, "token": "\n\n", "chosen_prob": 22.25, "runner_up_prob": 22.25, "runner_token": "\n\n", "margin": 55.07}, {"index": 203, "token": "The", "chosen_prob": 93.62, "runner_up_prob": 4.84, "runner_token": "It", "margin": 88.78}, {"index": 204, "token": " Treaty", "chosen_prob": 67.68, "runner_up_prob": 26.29, "runner_token": " signing", "margin": 41.4}, {"index": 205, "token": " of", "chosen_prob": 99.93, "runner_up_prob": 0.06, "runner_token": " was", "margin": 99.87}, {"index": 206, "token": " Wait", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "Wait", "margin": 100.0}, {"index": 207, "token": "angi", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": "agi", "margin": 100.0}, {"index": 208, "token": " is", "chosen_prob": 45.2, "runner_up_prob": 41.62, "runner_token": " was", "margin": 3.58}, {"index": 209, "token": " considered", "chosen_prob": 85.55, "runner_up_prob": 8.82, "runner_token": " a", "margin": 76.73}, {"index": 210, "token": " one", "chosen_prob": 55.68, "runner_up_prob": 25.12, "runner_token": " a", "margin": 30.56}, {"index": 211, "token": " of", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " the", "margin": 100.0}, {"index": 212, "token": " the", "chosen_prob": 99.49, "runner_up_prob": 0.51, "runner_token": " New", "margin": 98.97}, {"index": 213, "token": " most", "chosen_prob": 94.99, "runner_up_prob": 3.84, "runner_token": " founding", "margin": 91.16}, {"index": 214, "token": " significant", "chosen_prob": 70.58, "runner_up_prob": 29.36, "runner_token": " important", "margin": 41.22}, {"index": 215, "token": " documents", "chosen_prob": 94.6, "runner_up_prob": 4.35, "runner_token": " events", "margin": 90.26}, {"index": 216, "token": " in", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " of", "margin": 100.0}, {"index": 217, "token": " New", "chosen_prob": 99.97, "runner_up_prob": 0.03, "runner_token": " the", "margin": 99.94}, {"index": 218, "token": " Zealand", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " Ze", "margin": 100.0}, {"index": 219, "token": "'s", "chosen_prob": 96.43, "runner_up_prob": 3.57, "runner_token": " history", "margin": 92.86}, {"index": 220, "token": " history", "chosen_prob": 99.99, "runner_up_prob": 0.01, "runner_token": " constitutional", "margin": 99.98}, {"index": 221, "token": " and", "chosen_prob": 5.66, "runner_up_prob": 5.66, "runner_token": " and", "margin": 88.62}, {"index": 222, "token": " has", "chosen_prob": 29.73, "runner_up_prob": 29.73, "runner_token": " has", "margin": 10.42}, {"index": 223, "token": " had", "chosen_prob": 55.02, "runner_up_prob": 25.08, "runner_token": " played", "margin": 29.94}, {"index": 224, "token": " a", "chosen_prob": 99.06, "runner_up_prob": 0.72, "runner_token": " far", "margin": 98.34}, {"index": 225, "token": " profound", "chosen_prob": 88.41, "runner_up_prob": 11.16, "runner_token": " lasting", "margin": 77.24}, {"index": 226, "token": " impact", "chosen_prob": 99.79, "runner_up_prob": 0.18, "runner_token": " influence", "margin": 99.6}, {"index": 227, "token": " on", "chosen_prob": 100.0, "runner_up_prob": 0.0, "runner_token": " of", "margin": 100.0}, {"index": 228, "token": " the", "chosen_prob": 99.85, "runner_up_prob": 0.09, "runner_token": " New", "margin": 99.76}, {"index": 229, "token": " country", "chosen_prob": 94.25, "runner_up_prob": 4.65, "runner_token": " relationship", "margin": 89.6}, {"index": 230, "token": "'s", "chosen_prob": 99.76, "runner_up_prob": 0.2, "runner_token": " and", "margin": 99.56}, {"index": 231, "token": " development", "chosen_prob": 60.75, "runner_up_prob": 16.73, "runner_token": " politics", "margin": 44.02}, {"index": 232, "token": ".", "chosen_prob": 10.61, "runner_up_prob": 10.61, "runner_token": ".", "margin": 73.86}];
+const SNOWBALLS = [{"pos": 0, "prob": 71.77, "margin": 43.81, "post_avg": 95.89, "lift": 23.42, "token": "The", "context": " Treaty of Waitangi was signed on Februa"}, {"pos": 33, "prob": 28.26, "margin": 10.51, "post_avg": 91.64, "lift": 19.17, "token": " treaty", "context": " was signed by representatives of the Br"}, {"pos": 79, "prob": 68.88, "margin": 52.38, "post_avg": 91.71, "lift": 19.24, "token": "5", "context": " and March 16, 1840"}, {"pos": 103, "prob": 33.89, "margin": 13.55, "post_avg": 91.96, "lift": 19.49, "token": " signing", "context": " took place on February 6, "}, {"pos": 104, "prob": 55.62, "margin": 28.35, "post_avg": 97.5, "lift": 25.02, "token": " took", "context": " place on February 6, 184"}, {"pos": 141, "prob": 54.33, "margin": 38.54, "post_avg": 87.63, "lift": 15.16, "token": " were", "context": ":\n\n* William Hobson, the British"}, {"pos": 153, "prob": 17.36, "margin": 1.24, "post_avg": 94.23, "lift": 21.76, "token": " representative", "context": " of the British Crown\n* Hone"}, {"pos": 174, "prob": 15.43, "margin": 69.02, "post_avg": 89.51, "lift": 17.04, "token": "ap", "context": "uhi iwi\n* Tamati"}, {"pos": 188, "prob": 22.45, "margin": 54.89, "post_avg": 95.22, "lift": 22.74, "token": " another", "context": " prominent M\u0101ori chief from the Ng"}, {"pos": 189, "prob": 75.78, "margin": 64.62, "post_avg": 98.14, "lift": 25.67, "token": " prominent", "context": " M\u0101ori chief from the Ngap"}, {"pos": 208, "prob": 45.2, "margin": 3.58, "post_avg": 87.61, "lift": 15.14, "token": " is", "context": " considered one of the most significant "}, {"pos": 210, "prob": 55.68, "margin": 30.56, "post_avg": 94.95, "lift": 22.48, "token": " one", "context": " of the most significant documents in Ne"}, {"pos": 222, "prob": 29.73, "margin": 10.42, "post_avg": 92.02, "lift": 19.55, "token": " has", "context": " had a profound impact on the country's"}, {"pos": 223, "prob": 55.02, "margin": 29.94, "post_avg": 92.73, "lift": 20.26, "token": " had", "context": " a profound impact on the country's deve"}];
+const CHART_H = 300;
+const snowballPositions = new Set(SNOWBALLS.map(s => s.pos));
+
+// Y-axis
+const yAxis = document.getElementById('yAxis');
+for (let i = 100; i >= 0; i -= 10) {
+  const s = document.createElement('span');
+  s.textContent = i + '%';
+  yAxis.appendChild(s);
+}
+
+const colsEl = document.getElementById('columns');
+const indexRow = document.getElementById('indexRow');
+const tokenRow = document.getElementById('tokenRow');
+const marginRow = document.getElementById('marginRow');
+
+// Add left padding to label rows to match y-axis
+[indexRow, tokenRow, marginRow].forEach(row => {
+  row.style.marginLeft = '36px';
+});
+
+TOKENS.forEach((t, i) => {
+  // Column
+  const col = document.createElement('div');
+  col.className = 'token-col';
+  const barArea = document.createElement('div');
+  barArea.className = 'bar-area';
+
+  // Chosen bar: fills from top down
+  const chosenBar = document.createElement('div');
+  chosenBar.className = 'chosen-bar';
+  chosenBar.style.height = (t.chosen_prob / 100 * CHART_H) + 'px';
+  barArea.appendChild(chosenBar);
+
+  // Runner bar: fills from bottom up
+  const runnerBar = document.createElement('div');
+  runnerBar.className = 'runner-bar';
+  runnerBar.style.height = (t.runner_up_prob / 100 * CHART_H) + 'px';
+  barArea.appendChild(runnerBar);
+
+  // Snowball marker
+  if (snowballPositions.has(i)) {
+    const marker = document.createElement('div');
+    marker.className = 'snowball-marker';
+    barArea.appendChild(marker);
+  }
+
+  col.appendChild(barArea);
+  colsEl.appendChild(col);
+
+  // Tooltip events
+  col.addEventListener('mouseenter', (e) => {
+    const tt = document.getElementById('tooltip');
+    const marginStr = t.margin !== null ? t.margin.toFixed(1) + '%' : 'n/a';
+    const snowStr = snowballPositions.has(i) ? '<div style="color:#f85149;margin-top:4px;">Snowball pivot</div>' : '';
+    tt.innerHTML = '<div class="tt-token">' + escapeHtml(t.token) + '</div>'
+      + '<div class="tt-row"><span class="tt-label">Chosen:</span><span class="tt-value" style="color:#3fb950">' + t.chosen_prob + '%</span></div>'
+      + '<div class="tt-row"><span class="tt-label">Runner (' + escapeHtml(t.runner_token) + '):</span><span class="tt-value" style="color:#f0883e">' + t.runner_up_prob + '%</span></div>'
+      + '<div class="tt-row"><span class="tt-label">Margin:</span><span class="tt-value">' + marginStr + '</span></div>'
+      + snowStr;
+    tt.style.display = 'block';
+  });
+  col.addEventListener('mousemove', (e) => {
+    const tt = document.getElementById('tooltip');
+    tt.style.left = (e.clientX + 12) + 'px';
+    tt.style.top = (e.clientY - 10) + 'px';
+  });
+  col.addEventListener('mouseleave', () => {
+    document.getElementById('tooltip').style.display = 'none';
+  });
+
+  // Index label
+  const idxCell = document.createElement('div');
+  idxCell.className = 'cell';
+  idxCell.textContent = i;
+  indexRow.appendChild(idxCell);
+
+  // Token label
+  const tokCell = document.createElement('div');
+  tokCell.className = 'cell';
+  tokCell.title = t.token;
+  const display = t.token.trim() || '·';
+  tokCell.textContent = display.length > 4 ? display.slice(0, 4) : display;
+  tokenRow.appendChild(tokCell);
+
+  // Margin label
+  const mCell = document.createElement('div');
+  mCell.className = 'cell';
+  if (t.margin !== null) {
+    if (t.margin < 5) {
+      mCell.textContent = t.margin.toFixed(0) + '%';
+      mCell.classList.add('coin-flip');
+    } else {
+      mCell.textContent = t.margin.toFixed(0) + '%';
+    }
+  } else {
+    mCell.textContent = '-';
+  }
+  marginRow.appendChild(mCell);
+});
+
+// Snowball section
+if (SNOWBALLS.length > 0) {
+  const sec = document.getElementById('snowballSection');
+  let html = '<h2>Snowball Effect Analysis</h2><div class="chart-wrapper"><table><tr><th>Pos</th><th>Pivot</th><th>Chosen%</th><th>Margin</th><th>PostAvg</th><th>Lift</th><th>Context</th></tr>';
+  SNOWBALLS.sort((a, b) => b.lift - a.lift).forEach(s => {
+    const marginStr = s.margin !== null ? s.margin.toFixed(1) + '%' : 'n/a';
+    html += '<tr><td>' + s.pos + '</td><td style="font-family:monospace;color:#58a6ff">' + escapeHtml(s.token) + '</td><td>' + s.prob.toFixed(1) + '%</td><td>' + marginStr + '</td><td>' + s.post_avg.toFixed(1) + '%</td><td style="color:#f85149">+' + s.lift.toFixed(1) + '%</td><td style="font-family:monospace;font-size:11px">' + escapeHtml(s.context) + '</td></tr>';
+  });
+  html += '</table></div>';
+  sec.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>
